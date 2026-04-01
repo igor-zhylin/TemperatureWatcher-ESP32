@@ -206,6 +206,16 @@ void handleStats() {
 
   uint32_t n = min((uint32_t)50, totalWritten);
 
+  if (n == 0) {
+    server.send(200, "text/html",
+      "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+      "<style>body{font-family:sans-serif;background:#1a1a2e;color:#eee;display:flex;"
+      "justify-content:center;align-items:center;min-height:100vh;margin:0}"
+      "a{color:#e94560}</style></head>"
+      "<body><p>No records yet. <a href='/'>Back</a></p></body></html>");
+    return;
+  }
+
   // Single 800-byte array: bulk read then reverse in place (oldest→newest becomes newest→oldest)
   Record recs[50];
   uint32_t startIdx = (writeIdx - n + MAX_RECORDS) % MAX_RECORDS;
@@ -216,6 +226,7 @@ void handleStats() {
     flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, fp * RECORD_SIZE);
     flash.readByteArray(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
   }
+  // n >= 1 here so j = n-1 is safe (no uint32_t underflow)
   for (uint32_t i = 0, j = n - 1; i < j; i++, j--) { Record t = recs[i]; recs[i] = recs[j]; recs[j] = t; }
   // recs[0]=newest, recs[n-1]=oldest
 
@@ -293,29 +304,84 @@ void handleStats() {
   }
 
   server.sendContent_P(PSTR("</table><div style='text-align:center'>"
+    "<a class='btn' href='/export'>Download CSV</a>&nbsp;&nbsp;"
     "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
     "Reset Flash</a></div></div></body></html>"));
   server.client().stop();
 }
 
-// Erase all flash data and reset counters
+// Reset flash counters — erases only the metadata sector (sector 0).
+// Data sectors are NOT erased here: flashSaveRecord() erases each sector
+// automatically before first write, so old data is overwritten naturally.
+// Erasing all data sectors in-request caused watchdog resets on large flash usage.
 void handleFlashReset() {
   if (!flashOK) {
     server.send(503, "text/plain", "Flash not available");
     return;
   }
-  // Erase only the sectors that were actually used
-  uint32_t usedRecords = min((uint32_t)totalWritten, (uint32_t)MAX_RECORDS);
-  uint32_t usedSectors = (usedRecords + 255) / 256;
-  for (uint32_t s = 0; s <= usedSectors; s++) {
-    flash.eraseSector(s * 4096);
-  }
+  flash.eraseSector(0);
   writeIdx     = 0;
   totalWritten = 0;
   flashWriteMeta();
   Serial.println("Flash reset by user");
   server.sendHeader("Location", "/stats");
   server.send(303);
+}
+
+// CSV export — bypasses WebServer chunked encoding by writing directly to WiFiClient.
+// Uses Connection: close so the browser knows EOF when the socket closes.
+// Lines are batched into a 1 KB buffer; client.write() + yield() fires once per flush
+// to keep TCP packets large and feed the watchdog / WiFi stack.
+void handleExport() {
+  if (!flashOK) { server.send(503, "text/plain", "Flash not available"); return; }
+
+  uint32_t count    = min(totalWritten, (uint32_t)MAX_RECORDS);
+  uint32_t startIdx = (writeIdx - count + MAX_RECORDS) % MAX_RECORDS;
+
+  WiFiClient client = server.client();
+  client.print(F("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/csv\r\n"
+                 "Content-Disposition: attachment; filename=\"data.csv\"\r\n"
+                 "Connection: close\r\n"
+                 "\r\n"
+                 "num,time,temperature_c,pressure_hpa,pressure_mmhg,altitude_m\r\n"));
+
+  char     outbuf[1024];
+  uint16_t outlen = 0;
+
+  Record batch[16];
+  for (uint32_t i = 0; i < count; i += 16) {
+    uint32_t batchSize  = min((uint32_t)16, count - i);
+    uint32_t batchStart = (startIdx + i) % MAX_RECORDS;
+    if (batchStart + batchSize <= MAX_RECORDS) {
+      flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, batchSize * RECORD_SIZE);
+    } else {
+      uint32_t fp = MAX_RECORDS - batchStart;
+      flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, fp * RECORD_SIZE);
+      flash.readByteArray(RECORDS_ADDR, (uint8_t*)batch + fp * RECORD_SIZE, (batchSize - fp) * RECORD_SIZE);
+    }
+    for (uint32_t j = 0; j < batchSize; j++) {
+      char tbuf[20] = "";
+      if (batch[j].timestamp > 0) {
+        time_t t = batch[j].timestamp;
+        struct tm ti;
+        localtime_r(&t, &ti);
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &ti);
+      }
+      if (outlen > sizeof(outbuf) - 80) {
+        client.write((const uint8_t*)outbuf, outlen);
+        outlen = 0;
+        yield();
+      }
+      outlen += snprintf(outbuf + outlen, sizeof(outbuf) - outlen,
+        "%lu,\"%s\",%.1f,%.1f,%.1f,%.1f\r\n",
+        (unsigned long)(i + j + 1),
+        tbuf, batch[j].temp, batch[j].pressureHPa,
+        batch[j].pressureHPa / 1.33322f, batch[j].altitude);
+    }
+  }
+  if (outlen > 0) client.write((const uint8_t*)outbuf, outlen);
+  client.stop();
 }
 
 // JSON endpoint — snprintf into fixed buffer, zero heap allocations
@@ -466,6 +532,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/api", handleApi);
   server.on("/stats", handleStats);
+  server.on("/export", handleExport);
   server.on("/reset-flash", handleFlashReset);
   server.begin();
 
@@ -547,8 +614,7 @@ void loop() {
           lcd.setCursor(0, 0);
           lcd.print("Resetting flash...");
           Serial.println("Physical button: flash reset");
-          uint32_t usedSectors = (min(totalWritten, (uint32_t)MAX_RECORDS) + 255) / 256;
-          for (uint32_t s = 0; s <= usedSectors; s++) flash.eraseSector(s * 4096);
+          flash.eraseSector(0);  // metadata sector only — data sectors erased on next write
           writeIdx = 0; totalWritten = 0;
           flashWriteMeta();
           lcd.setCursor(0, 1);
