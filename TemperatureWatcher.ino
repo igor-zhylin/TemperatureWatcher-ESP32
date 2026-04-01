@@ -1,0 +1,534 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <LiquidCrystal_I2C.h>
+#include <Adafruit_BMP085.h>
+#include <SPI.h>
+#include <SPIMemory.h>
+
+// ===== Wi-Fi credentials =====
+const char* ssid     = "Earth";
+const char* password = "venus123";
+
+// Main LCD — sensor data (address 0x27)
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+// Second LCD 1602 — network info (A0 jumper soldered → address 0x26)
+LiquidCrystal_I2C lcd2(0x26, 16, 2);
+
+// BMP180 sensor (Adafruit BMP085 library is compatible with BMP180)
+Adafruit_BMP085 bmp;
+
+// Built-in LED pin (GPIO 2 on most ESP32 boards)
+const int LED_PIN    = 2;
+const int RESET_BTN  = 4;   // Flash reset button: GPIO4 → button → GND
+const int WRITE_LED  = 13;  // Red LED: GPIO13 → 220Ω → LED → GND
+bool ledState = false;
+
+// Web server on port 80
+WebServer server(80);
+
+// Sensor data (shared between display and web)
+float temp = 0;
+float pressureHPa = 0;
+float pressureMmHg = 0;
+float altitude = 0;
+
+// ===== W25Q64 SPI Flash =====
+// Wiring: MOSI=23, MISO=19, SCK=18, CS=5 (default ESP32 VSPI)
+#define FLASH_CS       5
+#define RECORDS_ADDR   4096UL    // records start at sector 1 (after metadata sector)
+#define MAX_RECORDS    524032    // 8MB flash: (8388608-4096)/16 = 524032 records
+#define RECORD_SIZE    16        // sizeof(Record) — must stay 16
+#define SAVE_INTERVAL  120000UL  // 2 minutes in ms — 524032 records ≈ 727 days
+
+SPIFlash flash(FLASH_CS);
+
+struct Record {           // 16 bytes
+  uint32_t timestamp;     // Unix time (Kyiv)
+  float    temp;
+  float    pressureHPa;
+  float    altitude;
+};
+
+uint32_t writeIdx     = 0;
+uint32_t totalWritten = 0;
+uint32_t lastSaveMs   = 0;
+uint32_t lastLcdMs    = 0;
+bool     flashOK      = false;
+
+// Draw static LCD labels once — never redrawn to avoid flicker
+void lcdDrawLabels() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Temp:");
+  lcd.setCursor(0, 1); lcd.print("hPa:");
+  lcd.setCursor(0, 2); lcd.print("mmHg:");
+  lcd.setCursor(0, 3); lcd.print("Alt:");
+}
+
+// ===== Flash helpers =====
+
+void flashWriteMeta() {
+  flash.eraseSector(0);
+  flash.writeAnything(0, writeIdx);
+  flash.writeAnything(4, totalWritten);
+}
+
+void flashInit() {
+  if (!flash.begin()) {
+    Serial.println("W25Q64 not found!");
+    return;
+  }
+  flashOK = true;
+  Serial.printf("Flash OK, capacity: %u bytes\n", flash.getCapacity());
+  flash.readAnything(0, writeIdx);
+  flash.readAnything(4, totalWritten);
+  if (writeIdx == 0xFFFFFFFF || writeIdx >= MAX_RECORDS) {
+    writeIdx = 0; totalWritten = 0;
+    flashWriteMeta();
+    Serial.println("Flash: initialized fresh (capacity ~727 days at 2 min interval)");
+  } else {
+    Serial.printf("Flash: resuming at record %u (total %u)\n", writeIdx, totalWritten);
+  }
+}
+
+void flashSaveRecord() {
+  if (!flashOK) return;
+  digitalWrite(WRITE_LED, HIGH);  // LED on while writing
+  Record r = { (uint32_t)time(nullptr), temp, pressureHPa, altitude };
+  uint32_t addr = RECORDS_ADDR + (uint32_t)writeIdx * RECORD_SIZE;
+  if (writeIdx % 256 == 0) flash.eraseSector(addr);
+  flash.writeAnything(addr, r);
+  totalWritten++;
+  writeIdx = (writeIdx + 1) % MAX_RECORDS;
+  flashWriteMeta();
+  digitalWrite(WRITE_LED, LOW);   // LED off when done
+}
+
+// Wi-Fi status code to human-readable string — const char* avoids heap allocation
+const char* wifiStatusToString(int status) {
+  switch (status) {
+    case WL_IDLE_STATUS:     return "Idle";
+    case WL_NO_SSID_AVAIL:   return "SSID not found!";
+    case WL_SCAN_COMPLETED:  return "Scan done";
+    case WL_CONNECTED:       return "Connected!";
+    case WL_CONNECT_FAILED:  return "Wrong password!";
+    case WL_CONNECTION_LOST: return "Connection lost";
+    case WL_DISCONNECTED:    return "Disconnected";
+    default:                 return "Unknown";
+  }
+}
+
+// Serve the main page — values updated via fetch('/api'), no full reload
+void handleRoot() {
+  // Page is static HTML — browser can cache it; values come from /api via JS
+  server.sendHeader("Cache-Control", "max-age=3600");
+  server.send_P(200, "text/html", R"rawliteral(<!DOCTYPE html>
+        <html lang="en"><head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>BMP180 Station</title>
+        <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;
+        display:flex;justify-content:center;align-items:center;min-height:100vh}
+        .card{background:#16213e;border-radius:16px;padding:32px 40px;
+        box-shadow:0 8px 32px rgba(0,0,0,.4);min-width:320px}
+        h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
+        .row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #2a2a4a}
+        .row:last-child{border-bottom:none}
+        .label{color:#888}.value{font-weight:bold;color:#e94560}
+        .footer{text-align:center;margin-top:16px;font-size:.8em;color:#555}
+        a{color:#e94560}
+        </style></head><body>
+        <div class="card">
+        <h1>BMP180 Weather Station</h1>
+        <div class="row"><span class="label">Temperature</span><span class="value" id="t">…</span></div>
+        <div class="row"><span class="label">Pressure</span><span class="value" id="p1">…</span></div>
+        <div class="row"><span class="label">Pressure</span><span class="value" id="p2">…</span></div>
+        <div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
+        <div class="footer"><span id="ts"></span> | <a href="/stats">History</a></div>
+        </div>
+        <script>
+        function upd(){
+          fetch('/api').then(r=>r.json()).then(d=>{
+            document.getElementById('t').textContent=d.temperature_c+' \u00b0C';
+            document.getElementById('p1').textContent=d.pressure_hpa+' hPa';
+            document.getElementById('p2').textContent=d.pressure_mmhg+' mmHg';
+            document.getElementById('al').textContent=d.altitude_m+' m';
+            document.getElementById('ts').textContent=new Date().toLocaleTimeString();
+          });
+        }
+        upd();setInterval(upd,5000);
+        </script>
+        </body></html>)rawliteral");
+}
+
+// Statistics page — chunked response, single stack array, zero String heap for rows
+void handleStats() {
+  if (!flashOK) { server.send(503, "text/plain", "Flash not available"); return; }
+
+  uint32_t n = min((uint32_t)50, totalWritten);
+
+  // Single 800-byte array: bulk read then reverse in place (oldest→newest becomes newest→oldest)
+  Record recs[50];
+  uint32_t startIdx = (writeIdx - n + MAX_RECORDS) % MAX_RECORDS;
+  if (startIdx + n <= MAX_RECORDS) {
+    flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, n * RECORD_SIZE);
+  } else {
+    uint32_t fp = MAX_RECORDS - startIdx;
+    flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, fp * RECORD_SIZE);
+    flash.readByteArray(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
+  }
+  for (uint32_t i = 0, j = n - 1; i < j; i++, j--) { Record t = recs[i]; recs[i] = recs[j]; recs[j] = t; }
+  // recs[0]=newest, recs[n-1]=oldest
+
+  // Temperature range for SVG
+  float tmin = recs[0].temp, tmax = recs[0].temp;
+  for (uint32_t i = 1; i < n; i++) {
+    if (recs[i].temp < tmin) tmin = recs[i].temp;
+    if (recs[i].temp > tmax) tmax = recs[i].temp;
+  }
+
+  // Chunked response: browser receives data immediately, no giant String in RAM
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+
+  server.sendContent_P(PSTR("<!DOCTYPE html><html lang='en'><head>"
+    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>History</title><style>"
+    "*{margin:0;padding:0;box-sizing:border-box}"
+    "body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;padding:24px}"
+    ".card{background:#16213e;border-radius:16px;padding:24px;margin:0 auto;max-width:680px}"
+    "h1{color:#e94560;margin-bottom:4px;font-size:1.3em}"
+    ".sub{color:#555;font-size:.85em;margin-bottom:16px}"
+    "svg{width:100%;height:80px;display:block;margin-bottom:20px}"
+    "table{width:100%;border-collapse:collapse;font-size:.9em}"
+    "th{color:#888;font-weight:normal;text-align:left;padding:6px 8px;border-bottom:1px solid #2a2a4a}"
+    "td{padding:6px 8px;border-bottom:1px solid #16213e}"
+    "tr:last-child td{border:none}"
+    ".v{color:#e94560;font-weight:bold}a{color:#e94560}"
+    ".btn{display:inline-block;margin-top:16px;padding:8px 18px;background:#e94560;"
+    "color:#fff;border-radius:8px;cursor:pointer;font-size:.9em;text-decoration:none}"
+    ".btn:hover{background:#c73652}"
+    "</style></head><body><div class='card'>"));
+
+  char buf[128];
+  snprintf(buf, sizeof(buf),
+    "<h1>Temperature History</h1>"
+    "<div class='sub'>Stored: %u | Showing: %u | <a href='/'>Live</a></div>",
+    totalWritten, n);
+  server.sendContent(buf);
+
+  // SVG chart — stream points without any String allocation
+  snprintf(buf, sizeof(buf),
+    "<svg viewBox='0 0 500 75' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"
+    "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>"
+    "<polyline points='", tmax);
+  server.sendContent(buf);
+
+  for (int i = (int)n - 1; i >= 0; i--) {
+    float x = (n < 2) ? 250 : (float)((int)n - 1 - i) / (n - 1) * 490 + 5;
+    float y = (tmax == tmin) ? 40 : 5 + (tmax - recs[i].temp) / (tmax - tmin) * 65;
+    char pt[16];
+    snprintf(pt, sizeof(pt), "%.0f,%.0f ", x, y);
+    server.sendContent(pt);
+  }
+
+  snprintf(buf, sizeof(buf),
+    "' fill='none' stroke='#e94560' stroke-width='2'/>"
+    "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text></svg>", tmin);
+  server.sendContent(buf);
+
+  // Table — each row built in a fixed 128-byte buffer, never allocates on heap
+  server.sendContent_P(PSTR("<table><tr><th>#</th><th>Time</th><th>Temp</th><th>Pressure</th><th>Alt</th></tr>"));
+  for (uint32_t i = 0; i < n; i++) {
+    char tbuf[20] = "-";
+    if (recs[i].timestamp > 0) {
+      time_t t = recs[i].timestamp;
+      struct tm ti;
+      localtime_r(&t, &ti);
+      strftime(tbuf, sizeof(tbuf), "%d.%m.%Y %H:%M", &ti);
+    }
+    char row[128];
+    snprintf(row, sizeof(row),
+      "<tr><td>%u</td><td>%s</td><td class='v'>%.1f&deg;C</td><td>%.1f hPa</td><td>%.1f m</td></tr>",
+      totalWritten - i, tbuf, recs[i].temp, recs[i].pressureHPa, recs[i].altitude);
+    server.sendContent(row);
+  }
+
+  server.sendContent_P(PSTR("</table><div style='text-align:center'>"
+    "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
+    "Reset Flash</a></div></div></body></html>"));
+  server.client().stop();
+}
+
+// Erase all flash data and reset counters
+void handleFlashReset() {
+  if (!flashOK) {
+    server.send(503, "text/plain", "Flash not available");
+    return;
+  }
+  // Erase only the sectors that were actually used
+  uint32_t usedRecords = min((uint32_t)totalWritten, (uint32_t)MAX_RECORDS);
+  uint32_t usedSectors = (usedRecords + 255) / 256;
+  for (uint32_t s = 0; s <= usedSectors; s++) {
+    flash.eraseSector(s * 4096);
+  }
+  writeIdx     = 0;
+  totalWritten = 0;
+  flashWriteMeta();
+  Serial.println("Flash reset by user");
+  server.sendHeader("Location", "/stats");
+  server.send(303);
+}
+
+// JSON endpoint — snprintf into fixed buffer, zero heap allocations
+void handleApi() {
+  server.sendHeader("Cache-Control", "no-cache");
+  char json[80];
+  snprintf(json, sizeof(json), "{\"temperature_c\":%.1f,\"pressure_hpa\":%.1f,\"pressure_mmhg\":%.1f,\"altitude_m\":%.1f}", temp, pressureHPa, pressureMmHg, altitude);
+  server.send(200, "application/json", json);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(RESET_BTN, INPUT_PULLUP);
+  pinMode(WRITE_LED, OUTPUT);
+  digitalWrite(WRITE_LED, LOW);
+
+  // Initialize W25Q64 flash
+  flashInit();
+
+  // Initialize LCDs
+  lcd.init();
+  lcd.backlight();
+  lcd2.init();
+  lcd2.backlight();
+
+  // ===== Splash screen =====
+  lcd.setCursor(3, 1);
+  lcd.print("BMP180 Station");
+  delay(1500);
+  lcd.clear();
+
+  // ===== Initialize BMP180 =====
+  lcd.setCursor(0, 0);
+  lcd.print("[1/2] Sensor...");
+  Serial.println("Initializing BMP180...");
+
+  if (!bmp.begin()) {
+    lcd.setCursor(0, 1);
+    lcd.print("FAIL: BMP180 missing");
+    Serial.println("BMP180 not found!");
+    while (true) { 
+      delay(1000); 
+    }
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("OK: BMP180 ready");
+  Serial.println("BMP180 OK");
+  delay(1000);
+
+  // ===== Connect to Wi-Fi =====
+  lcd.setCursor(0, 2);
+  lcd.print("[2/2] WiFi...");
+  Serial.printf("Connecting to: %s\n", ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(500);
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  int lastStatus = -1;
+
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(1000);
+    attempts++;
+
+    int status = WiFi.status();
+
+    // Update LCD only when status changes or every 5 attempts
+    if (status != lastStatus || attempts % 5 == 0) {
+      lcd.setCursor(0, 3);
+      lcd.print("                    ");  // clear row
+      lcd.setCursor(0, 3);
+      lcd.print(wifiStatusToString(status));
+      lcd.print(" (");
+      lcd.print(attempts);
+      lcd.print("/30)");
+      lastStatus = status;
+    }
+
+    Serial.printf("  Attempt %d/30 - Status: %s (%d)\n",
+                  attempts, wifiStatusToString(status), status);
+
+    // Blink LED while connecting
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+  }
+
+  // ===== Check result =====
+  lcd.clear();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    lcd.setCursor(0, 0);
+    lcd.print("=== WiFi FAILED ===");
+    lcd.setCursor(0, 1);
+    lcd.print("SSID: ");
+    lcd.print(ssid);
+    lcd.setCursor(0, 2);
+    lcd.print("Err: ");
+    lcd.print(wifiStatusToString(WiFi.status()));
+    lcd.setCursor(0, 3);
+    lcd.print("Restart to retry");
+
+    Serial.println("WiFi connection FAILED!");
+    Serial.printf("Last status: %s (%d)\n", wifiStatusToString(WiFi.status()), WiFi.status());
+
+    while (1) { 
+      delay(1000); 
+    }
+  }
+
+  // ===== WiFi connected =====
+  Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString());
+
+  // ===== NTP time sync (Kyiv: UTC+2 winter / UTC+3 summer) =====
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Syncing time...");
+  Serial.println("Syncing NTP...");
+
+  configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+
+  struct tm ti;
+  int ntpAttempts = 0;
+  while (!getLocalTime(&ti) && ntpAttempts < 20) {
+    delay(500);
+    ntpAttempts++;
+  }
+
+  if (getLocalTime(&ti)) {
+    char buf[20];
+    strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &ti);
+    Serial.printf("Time synced: %s\n", buf);
+    lcd.setCursor(0, 1);
+    lcd.print("OK: ");
+    lcd.print(buf);
+  } else {
+    Serial.println("NTP sync failed, timestamps will be 0");
+    lcd.setCursor(0, 1);
+    lcd.print("NTP FAIL, continuing");
+  }
+  delay(1500);
+  lcd.clear();
+
+  // Setup web server routes
+  server.on("/", handleRoot);
+  server.on("/api", handleApi);
+  server.on("/stats", handleStats);
+  server.on("/reset-flash", handleFlashReset);
+  server.begin();
+
+  Serial.println("HTTP server started");
+
+  // Show network info on second LCD 1602 (stays static)
+  // Row 0: IP address (max 15 chars — fits exactly in 16 cols)
+  // Row 1: SSID truncated to 16 chars
+  lcd2.clear();
+  lcd2.setCursor(0, 0);
+  lcd2.print(WiFi.localIP());
+  lcd2.setCursor(0, 1);
+  char ssidBuf[17];
+  strncpy(ssidBuf, ssid, 16);
+  ssidBuf[16] = '\0';
+  lcd2.print(ssidBuf);
+
+  delay(2000);
+  lcdDrawLabels();
+}
+
+void loop() {
+  // Handle incoming HTTP requests
+  server.handleClient();
+
+  // Update sensor + LCD every 500 ms without blocking
+  if (millis() - lastLcdMs >= 500) {
+    lastLcdMs = millis();
+
+    // Read sensor
+    temp = bmp.readTemperature();
+    int32_t rawPressure = bmp.readPressure();
+    pressureHPa  = rawPressure / 100.0;
+    pressureMmHg = rawPressure / 133.322;
+    altitude     = bmp.readAltitude();
+
+    // Toggle LED on each sensor read
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+
+    // Write only values at fixed positions with fixed width — no flicker
+    char buf[15];
+
+    // Row 0: "Temp: " + "-99.9 C  " (col 6, 9 chars)
+    snprintf(buf, sizeof(buf), "%6.1f\xDFC  ", temp);
+    lcd.setCursor(6, 0); lcd.print(buf);
+
+    // Row 1: "hPa:  " + "1013.2 hPa" (col 6, 10 chars)
+    snprintf(buf, sizeof(buf), "%7.1f hPa", pressureHPa);
+    lcd.setCursor(6, 1); lcd.print(buf);
+
+    // Row 2: "mmHg: " + " 760.0 mmHg" (col 6, 10 chars)
+    snprintf(buf, sizeof(buf), "%7.1f mmH", pressureMmHg);
+    lcd.setCursor(6, 2); lcd.print(buf);
+
+    // Row 3: "Alt:  " + " 123.4 m  " (col 5, 11 chars)
+    snprintf(buf, sizeof(buf), "%8.1f m  ", altitude);
+    lcd.setCursor(5, 3); lcd.print(buf);
+  }
+
+  // Physical flash reset button: hold 2 seconds to confirm
+  // Crunch as for me 
+  if (digitalRead(RESET_BTN) == LOW) {
+    delay(50);                          // debounce
+    if (digitalRead(RESET_BTN) == LOW) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Hold 2s to reset");
+      lcd.setCursor(0, 1);
+      lcd.print("flash...");
+      uint32_t holdStart = millis();
+      while (digitalRead(RESET_BTN) == LOW) {
+        if (millis() - holdStart >= 2000) {
+          // Confirmed — erase
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Resetting flash...");
+          Serial.println("Physical button: flash reset");
+          uint32_t usedSectors = (min(totalWritten, (uint32_t)MAX_RECORDS) + 255) / 256;
+          for (uint32_t s = 0; s <= usedSectors; s++) flash.eraseSector(s * 4096);
+          writeIdx = 0; totalWritten = 0;
+          flashWriteMeta();
+          lcd.setCursor(0, 1);
+          lcd.print("Done!");
+          delay(1500);
+          lcd.clear();
+          break;
+        }
+      }
+      // Released before 2s — cancelled
+      if (digitalRead(RESET_BTN) == HIGH && millis() - holdStart < 2000) {
+        lcd.clear();
+      }
+    }
+  }
+
+  // Save to flash on interval
+  if (millis() - lastSaveMs >= SAVE_INTERVAL) {
+    flashSaveRecord();
+    lastSaveMs = millis();
+  }
+}
