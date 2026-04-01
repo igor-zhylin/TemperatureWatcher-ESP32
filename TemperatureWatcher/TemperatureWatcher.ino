@@ -6,9 +6,10 @@
 #include <SPI.h>
 #include <SPIMemory.h>
 
-// ===== Wi-Fi credentials =====
-const char* ssid     = "Earth";
-const char* password = "venus123";
+// ===== Wi-Fi credentials (defined in secrets.h, not tracked by git) =====
+#include "secrets.h"
+const char* ssid     = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
 // Main LCD — sensor data (address 0x27)
 LiquidCrystal_I2C lcd(0x27, 20, 4);
