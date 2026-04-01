@@ -249,10 +249,10 @@ void handleStats() {
       localtime_r(&t, &ti);
       strftime(tbuf, sizeof(tbuf), "%d.%m.%Y %H:%M", &ti);
     }
-    char row[128];
+    char row[160];
     snprintf(row, sizeof(row),
-      "<tr><td>%u</td><td>%s</td><td class='v'>%.1f&deg;C</td><td>%.1f hPa</td><td>%.1f m</td></tr>",
-      totalWritten - i, tbuf, recs[i].temp, recs[i].pressureHPa, recs[i].altitude);
+      "<tr><td>%u</td><td>%s</td><td class='v'>%.1f&deg;C</td><td>%.1f hPa / %.1f mmHg</td><td>%.1f m</td></tr>",
+      totalWritten - i, tbuf, recs[i].temp, recs[i].pressureHPa, recs[i].pressureHPa / 1.33322f, recs[i].altitude);
     server.sendContent(row);
   }
 
@@ -285,7 +285,7 @@ void handleFlashReset() {
 // JSON endpoint — snprintf into fixed buffer, zero heap allocations
 void handleApi() {
   server.sendHeader("Cache-Control", "no-cache");
-  char json[80];
+  char json[96];
   snprintf(json, sizeof(json), "{\"temperature_c\":%.1f,\"pressure_hpa\":%.1f,\"pressure_mmhg\":%.1f,\"altitude_m\":%.1f}", temp, pressureHPa, pressureMmHg, altitude);
   server.send(200, "application/json", json);
 }
