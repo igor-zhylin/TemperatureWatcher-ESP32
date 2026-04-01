@@ -119,6 +119,7 @@ void flashInit() {
   }
   flashOK = true;
   Serial.printf("Flash OK, capacity: %u bytes\n", flash.getCapacity());
+  digitalWrite(WRITE_LED, HIGH);
   flash.readAnything(0, writeIdx);
   flash.readAnything(4, totalWritten);
   if (writeIdx == 0xFFFFFFFF || writeIdx >= MAX_RECORDS) {
@@ -128,6 +129,7 @@ void flashInit() {
   } else {
     Serial.printf("Flash: resuming at record %u (total %u)\n", writeIdx, totalWritten);
   }
+  digitalWrite(WRITE_LED, LOW);
 }
 
 void flashSaveRecord() {
@@ -220,6 +222,7 @@ void handleStats() {
   // Single 800-byte array: bulk read then reverse in place (oldest→newest becomes newest→oldest)
   Record recs[50];
   uint32_t startIdx = (writeIdx - n + MAX_RECORDS) % MAX_RECORDS;
+  digitalWrite(WRITE_LED, HIGH);
   if (startIdx + n <= MAX_RECORDS) {
     flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, n * RECORD_SIZE);
   } else {
@@ -227,6 +230,7 @@ void handleStats() {
     flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, fp * RECORD_SIZE);
     flash.readByteArray(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
   }
+  digitalWrite(WRITE_LED, LOW);
   // n >= 1 here so j = n-1 is safe (no uint32_t underflow)
   for (uint32_t i = 0, j = n - 1; i < j; i++, j--) { Record t = recs[i]; recs[i] = recs[j]; recs[j] = t; }
   // recs[0]=newest, recs[n-1]=oldest
@@ -320,10 +324,12 @@ void handleFlashReset() {
     server.send(503, "text/plain", "Flash not available");
     return;
   }
+  digitalWrite(WRITE_LED, HIGH);
   flash.eraseSector(0);
   writeIdx     = 0;
   totalWritten = 0;
   flashWriteMeta();
+  digitalWrite(WRITE_LED, LOW);
   Serial.println("Flash reset by user");
   server.sendHeader("Location", "/stats");
   server.send(303);
@@ -354,6 +360,7 @@ void handleExport() {
   for (uint32_t i = 0; i < count; i += 16) {
     uint32_t batchSize  = min((uint32_t)16, count - i);
     uint32_t batchStart = (startIdx + i) % MAX_RECORDS;
+    digitalWrite(WRITE_LED, HIGH);
     if (batchStart + batchSize <= MAX_RECORDS) {
       flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, batchSize * RECORD_SIZE);
     } else {
@@ -361,6 +368,7 @@ void handleExport() {
       flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, fp * RECORD_SIZE);
       flash.readByteArray(RECORDS_ADDR, (uint8_t*)batch + fp * RECORD_SIZE, (batchSize - fp) * RECORD_SIZE);
     }
+    digitalWrite(WRITE_LED, LOW);
     for (uint32_t j = 0; j < batchSize; j++) {
       char tbuf[20] = "";
       if (batch[j].timestamp > 0) {
@@ -615,9 +623,11 @@ void loop() {
           lcd.setCursor(0, 0);
           lcd.print("Resetting flash...");
           Serial.println("Physical button: flash reset");
+          digitalWrite(WRITE_LED, HIGH);
           flash.eraseSector(0);  // metadata sector only — data sectors erased on next write
           writeIdx = 0; totalWritten = 0;
           flashWriteMeta();
+          digitalWrite(WRITE_LED, LOW);
           lcd.setCursor(0, 1);
           lcd.print("Done!");
           delay(1500);
