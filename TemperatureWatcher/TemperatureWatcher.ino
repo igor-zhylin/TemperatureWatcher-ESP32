@@ -326,6 +326,7 @@ void handleStats() {
     "<a class='btn' href='/export'>Download CSV</a>&nbsp;&nbsp;"
     "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
     "Reset Flash</a></div></div></body></html>"));
+  server.sendContent("");  // terminate chunked transfer encoding
   server.client().stop();
 }
 
@@ -371,10 +372,10 @@ void handleExport() {
   uint16_t outlen = 0;
 
   Record batch[16];
+  digitalWrite(WRITE_LED, HIGH);  // stay on for entire export — individual reads are ~100 µs, invisible per-batch
   for (uint32_t i = 0; i < count; i += 16) {
     uint32_t batchSize  = min((uint32_t)16, count - i);
     uint32_t batchStart = (startIdx + i) % MAX_RECORDS;
-    digitalWrite(WRITE_LED, HIGH);
     if (batchStart + batchSize <= MAX_RECORDS) {
       flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, batchSize * RECORD_SIZE);
     } else {
@@ -382,7 +383,6 @@ void handleExport() {
       flash.readByteArray(RECORDS_ADDR + batchStart * RECORD_SIZE, (uint8_t*)batch, fp * RECORD_SIZE);
       flash.readByteArray(RECORDS_ADDR, (uint8_t*)batch + fp * RECORD_SIZE, (batchSize - fp) * RECORD_SIZE);
     }
-    digitalWrite(WRITE_LED, LOW);
     for (uint32_t j = 0; j < batchSize; j++) {
       char tbuf[20] = "";
       if (batch[j].timestamp > 0) {
@@ -391,7 +391,8 @@ void handleExport() {
         localtime_r(&t, &ti);
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &ti);
       }
-      if (outlen > sizeof(outbuf) - 80) {
+      // Flush before writing: one CSV line is at most ~70 bytes
+      if (outlen + 80 > sizeof(outbuf)) {
         client.write((const uint8_t*)outbuf, outlen);
         outlen = 0;
         yield();
@@ -404,6 +405,7 @@ void handleExport() {
     }
   }
   if (outlen > 0) client.write((const uint8_t*)outbuf, outlen);
+  digitalWrite(WRITE_LED, LOW);
   client.stop();
 }
 
@@ -591,8 +593,8 @@ void loop() {
     // Read sensor
     temp = bmp.readTemperature();
     int32_t rawPressure = bmp.readPressure();
-    pressureHPa  = rawPressure / 100.0;
-    pressureMmHg = rawPressure / 133.322;
+    pressureHPa  = rawPressure / 100.0f;
+    pressureMmHg = rawPressure / 133.322f;
     altitude     = bmp.readAltitude();
 
     // Toggle LED on each sensor read
@@ -631,6 +633,7 @@ void loop() {
       lcd.print("flash...");
       uint32_t holdStart = millis();
       while (digitalRead(RESET_BTN) == LOW) {
+        delay(10);  // feed watchdog, avoid tight-loop reset
         if (millis() - holdStart >= 2000) {
           // Confirmed — erase
           lcd.clear();
