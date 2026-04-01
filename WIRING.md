@@ -7,7 +7,7 @@ All three devices share the same I2C bus. Power supply is 3.3 V or 5 V depending
 | Device | I2C Address | Size | Purpose |
 |---|---|---|---|
 | LCD 2004 (20×4) | `0x27` | 20 columns, 4 rows | Sensor readings: temperature, pressure (hPa/mmHg), altitude |
-| LCD 1602 (16×2) | `0x26` | 16 columns, 2 rows | Network info: IP address and SSID |
+| LCD 1602 (16×2) | `0x26` | 16 columns, 2 rows | Network info: row 0 — `WiFi: <SSID>`, row 1 — `IP: <address>` |
 | BMP180 | `0x77` (hardware-fixed) | — | Temperature, atmospheric pressure, altitude sensor |
 
 > The LCD 1602 has the A0 address jumper soldered, shifting the address from `0x27` to `0x26` to avoid conflict with the LCD 2004.

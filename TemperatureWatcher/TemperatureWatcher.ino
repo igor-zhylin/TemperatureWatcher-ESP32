@@ -57,6 +57,12 @@ uint32_t lastSaveMs   = 0;
 uint32_t lastLcdMs    = 0;
 bool     flashOK      = false;
 
+// LCD2 row-1 scroll state
+char     lcd2IpStr[24] = {};
+int      lcd2ScrollPos = 0;
+int      lcd2ScrollDir = 1;
+uint32_t lcd2ScrollMs  = 0;
+
 // Draw static LCD labels once — never redrawn to avoid flicker
 void lcdDrawLabels() {
   lcd.clear();
@@ -435,17 +441,17 @@ void setup() {
 
   Serial.println("HTTP server started");
 
-  // Show network info on second LCD 1602 (stays static)
-  // Row 0: IP address (max 15 chars — fits exactly in 16 cols)
-  // Row 1: SSID truncated to 16 chars
+  // Show network info on second LCD 1602
+  // Row 0: "WiFi: " + SSID (truncated to 10 chars → fits in 16 cols, static)
+  // Row 1: "IP: <address>" — scrolls left/right in loop() if longer than 16 chars
   lcd2.clear();
+  char lcd2row[17];
+  snprintf(lcd2row, sizeof(lcd2row), "WiFi: %.10s", ssid);
   lcd2.setCursor(0, 0);
-  lcd2.print(WiFi.localIP());
+  lcd2.print(lcd2row);
+  snprintf(lcd2IpStr, sizeof(lcd2IpStr), "IP: %s", WiFi.localIP().toString().c_str());
   lcd2.setCursor(0, 1);
-  char ssidBuf[17];
-  strncpy(ssidBuf, ssid, 16);
-  ssidBuf[16] = '\0';
-  lcd2.print(ssidBuf);
+  lcd2.print(lcd2IpStr);  // initial paint (may be visually truncated — scroll handles the rest)
 
   delay(2000);
   lcdDrawLabels();
@@ -530,5 +536,20 @@ void loop() {
   if (millis() - lastSaveMs >= SAVE_INTERVAL) {
     flashSaveRecord();
     lastSaveMs = millis();
+  }
+
+  // Scroll IP on LCD2 row 1 if it doesn't fit in 16 chars (bounce left↔right every 400 ms)
+  int ipLen = (int)strlen(lcd2IpStr);
+  if (ipLen > 16 && millis() - lcd2ScrollMs >= 400) {
+    lcd2ScrollMs = millis();
+    int maxPos = ipLen - 16;
+    char win[17];
+    strncpy(win, lcd2IpStr + lcd2ScrollPos, 16);
+    win[16] = '\0';
+    lcd2.setCursor(0, 1);
+    lcd2.print(win);
+    lcd2ScrollPos += lcd2ScrollDir;
+    if (lcd2ScrollPos >= maxPos) { lcd2ScrollPos = maxPos; lcd2ScrollDir = -1; }
+    if (lcd2ScrollPos <= 0)      { lcd2ScrollPos = 0;      lcd2ScrollDir =  1; }
   }
 }
