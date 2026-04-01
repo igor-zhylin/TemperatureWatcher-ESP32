@@ -57,11 +57,42 @@ uint32_t lastSaveMs   = 0;
 uint32_t lastLcdMs    = 0;
 bool     flashOK      = false;
 
-// LCD2 row-1 scroll state
-char     lcd2IpStr[24] = {};
-int      lcd2ScrollPos = 0;
-int      lcd2ScrollDir = 1;
-uint32_t lcd2ScrollMs  = 0;
+// LCD2 scroll state — prefixes "WiFi: " and "IP: " are static; only values scroll
+char lcd2SsidVal[33] = {};  // SSID only, up to 32 chars
+char lcd2IpVal[16]   = {};  // IP address only, up to 15 chars
+
+struct ScrollTrack {
+  int      pos     = 0;
+  int      dir     = 1;
+  uint32_t pauseMs = 0;  // non-zero while paused at an end
+};
+
+ScrollTrack lcd2SsidScroll;
+ScrollTrack lcd2IpScroll;
+uint32_t    lcd2ScrollMs = 0;
+
+// Render one scrolling field on lcd2. Draws the visible window at (col, row) and
+// advances the position, pausing 500 ms at each end before reversing.
+// winSize — number of visible columns available for the value.
+void lcd2ScrollTick(ScrollTrack& t, const char* val, uint8_t col, uint8_t row, int winSize) {
+  int len = (int)strlen(val);
+  if (len <= winSize) return;  // fits — nothing to scroll
+
+  char win[17];
+  strncpy(win, val + t.pos, winSize);
+  win[winSize] = '\0';
+  lcd2.setCursor(col, row);
+  lcd2.print(win);
+
+  int maxPos = len - winSize;
+  if (t.pauseMs == 0) {
+    t.pos += t.dir;
+    if (t.pos >= maxPos) { t.pos = maxPos; t.dir = -1; t.pauseMs = millis(); }
+    if (t.pos <= 0)      { t.pos = 0;      t.dir =  1; t.pauseMs = millis(); }
+  } else if (millis() - t.pauseMs >= 500) {
+    t.pauseMs = 0;
+  }
+}
 
 // Draw static LCD labels once — never redrawn to avoid flicker
 void lcdDrawLabels() {
@@ -225,12 +256,11 @@ void handleStats() {
     totalWritten, n);
   server.sendContent(buf);
 
-  // SVG chart — stream points without any String allocation
-  snprintf(buf, sizeof(buf),
-    "<svg viewBox='0 0 500 75' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"
-    "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>"
-    "<polyline points='", tmax);
+  // SVG chart — static parts via sendContent_P, only dynamic values through buf
+  server.sendContent_P(PSTR("<svg viewBox='0 0 500 75' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"));
+  snprintf(buf, sizeof(buf), "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>", tmax);
   server.sendContent(buf);
+  server.sendContent_P(PSTR("<polyline points='"));
 
   for (int i = (int)n - 1; i >= 0; i--) {
     float x = (n < 2) ? 250 : (float)((int)n - 1 - i) / (n - 1) * 490 + 5;
@@ -240,10 +270,10 @@ void handleStats() {
     server.sendContent(pt);
   }
 
-  snprintf(buf, sizeof(buf),
-    "' fill='none' stroke='#e94560' stroke-width='2'/>"
-    "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text></svg>", tmin);
+  server.sendContent_P(PSTR("' fill='none' stroke='#e94560' stroke-width='2'/>"));
+  snprintf(buf, sizeof(buf), "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>", tmin);
   server.sendContent(buf);
+  server.sendContent_P(PSTR("</svg>"));
 
   // Table — each row built in a fixed 128-byte buffer, never allocates on heap
   server.sendContent_P(PSTR("<table><tr><th>#</th><th>Time</th><th>Temp</th><th>Pressure</th><th>Alt</th></tr>"));
@@ -444,14 +474,17 @@ void setup() {
   // Show network info on second LCD 1602
   // Row 0: "WiFi: " + SSID (truncated to 10 chars → fits in 16 cols, static)
   // Row 1: "IP: <address>" — scrolls left/right in loop() if longer than 16 chars
+  strncpy(lcd2SsidVal, ssid, 32);
+  lcd2SsidVal[32] = '\0';
+  strncpy(lcd2IpVal, WiFi.localIP().toString().c_str(), 15);
+  lcd2IpVal[15] = '\0';
+
+  // Static prefixes + initial value paint (scroll takes over in loop if value is too long)
   lcd2.clear();
-  char lcd2row[17];
-  snprintf(lcd2row, sizeof(lcd2row), "WiFi: %.10s", ssid);
-  lcd2.setCursor(0, 0);
-  lcd2.print(lcd2row);
-  snprintf(lcd2IpStr, sizeof(lcd2IpStr), "IP: %s", WiFi.localIP().toString().c_str());
-  lcd2.setCursor(0, 1);
-  lcd2.print(lcd2IpStr);  // initial paint (may be visually truncated — scroll handles the rest)
+  lcd2.setCursor(0, 0); lcd2.print("WiFi: ");
+  lcd2.setCursor(0, 1); lcd2.print("IP: ");
+  lcd2.setCursor(6, 0); lcd2.print(lcd2SsidVal);
+  lcd2.setCursor(4, 1); lcd2.print(lcd2IpVal);
 
   delay(2000);
   lcdDrawLabels();
@@ -538,18 +571,12 @@ void loop() {
     lastSaveMs = millis();
   }
 
-  // Scroll IP on LCD2 row 1 if it doesn't fit in 16 chars (bounce left↔right every 400 ms)
-  int ipLen = (int)strlen(lcd2IpStr);
-  if (ipLen > 16 && millis() - lcd2ScrollMs >= 400) {
+  // Scroll LCD2 values if they overflow their column window (bounce left↔right every 400 ms)
+  // Row 0: "WiFi: " fixed at cols 0-5, SSID scrolls in cols 6-15 (10 chars)
+  // Row 1: "IP: "   fixed at cols 0-3, IP   scrolls in cols 4-15 (12 chars)
+  if (millis() - lcd2ScrollMs >= 400) {
     lcd2ScrollMs = millis();
-    int maxPos = ipLen - 16;
-    char win[17];
-    strncpy(win, lcd2IpStr + lcd2ScrollPos, 16);
-    win[16] = '\0';
-    lcd2.setCursor(0, 1);
-    lcd2.print(win);
-    lcd2ScrollPos += lcd2ScrollDir;
-    if (lcd2ScrollPos >= maxPos) { lcd2ScrollPos = maxPos; lcd2ScrollDir = -1; }
-    if (lcd2ScrollPos <= 0)      { lcd2ScrollPos = 0;      lcd2ScrollDir =  1; }
+    lcd2ScrollTick(lcd2SsidScroll, lcd2SsidVal, 6, 0, 10);
+    lcd2ScrollTick(lcd2IpScroll,   lcd2IpVal,   4, 1, 12);
   }
 }
