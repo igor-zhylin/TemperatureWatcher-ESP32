@@ -37,11 +37,16 @@ float altitude = 0;
 
 // ===== W25Q64 SPI Flash =====
 // Wiring: MOSI=23, MISO=19, SCK=18, CS=5 (default ESP32 VSPI)
-#define FLASH_CS       5
-#define RECORDS_ADDR   4096UL    // records start at sector 1 (after metadata sector)
-#define MAX_RECORDS    524032    // 8MB flash: (8388608-4096)/16 = 524032 records
-#define RECORD_SIZE    16        // sizeof(Record) — must stay 16
-#define SAVE_INTERVAL  120000UL  // 2 minutes in ms — 524032 records ≈ 727 days
+#define FLASH_CS         5
+#define RECORDS_ADDR     4096UL    // records start at sector 1 (after metadata sector)
+#define MAX_RECORDS      524032    // 8MB flash: (8388608-4096)/16 = 524032 records
+#define RECORD_SIZE      16        // sizeof(Record) — must stay 16
+#define SAVE_INTERVAL    120000UL  // 2 minutes in ms — 524032 records ≈ 727 days
+// Wear leveling for metadata sector (sector 0, 4096 bytes):
+// 512 slots × 8 bytes — write appends to next slot, erase only when sector is full.
+// Reduces erase frequency 512× (every ~17 h instead of every 2 min → ~190 years).
+#define META_SLOT_SIZE   8
+#define META_SLOT_COUNT  (4096 / META_SLOT_SIZE)  // 512 slots per erase cycle
 
 SPIFlash flash(FLASH_CS);
 
@@ -54,6 +59,7 @@ struct Record {           // 16 bytes
 
 uint32_t writeIdx     = 0;
 uint32_t totalWritten = 0;
+uint16_t metaSlot     = 0;  // current slot index in sector 0 (0..META_SLOT_COUNT)
 uint32_t lastSaveMs   = 0;
 uint32_t lastLcdMs    = 0;
 bool     flashOK      = false;
@@ -107,9 +113,14 @@ void lcdDrawLabels() {
 // ===== Flash helpers =====
 
 void flashWriteMeta() {
-  flash.eraseSector(0);
-  flash.writeAnything(0, writeIdx);
-  flash.writeAnything(4, totalWritten);
+  if (metaSlot >= META_SLOT_COUNT) {
+    flash.eraseSector(0);
+    metaSlot = 0;
+  }
+  uint32_t addr = (uint32_t)metaSlot * META_SLOT_SIZE;
+  flash.writeAnything(addr, writeIdx);
+  flash.writeAnything(addr + 4, totalWritten);
+  metaSlot++;
 }
 
 void flashInit() {
@@ -120,14 +131,32 @@ void flashInit() {
   flashOK = true;
   Serial.printf("Flash OK, capacity: %u bytes\n", flash.getCapacity());
   digitalWrite(WRITE_LED, HIGH);
-  flash.readAnything(0, writeIdx);
-  flash.readAnything(4, totalWritten);
-  if (writeIdx == 0xFFFFFFFF || writeIdx >= MAX_RECORDS) {
+
+  // Binary search for the first empty slot in sector 0.
+  // Slots are always written in order 0,1,2,..., so the layout is:
+  //   [valid|valid|...|valid|empty|empty|...|empty]
+  // An empty slot has both words == 0xFFFFFFFF (erased flash state).
+  // log2(512) = 9 reads instead of up to 1024 sequential reads.
+  uint16_t lo = 0, hi = META_SLOT_COUNT;
+  while (lo < hi) {
+    uint16_t mid = lo + (hi - lo) / 2;
+    uint32_t wi, tw;
+    flash.readAnything((uint32_t)mid * META_SLOT_SIZE,     wi);
+    flash.readAnything((uint32_t)mid * META_SLOT_SIZE + 4, tw);
+    if (wi == 0xFFFFFFFF && tw == 0xFFFFFFFF) hi = mid;
+    else                                       lo = mid + 1;
+  }
+  metaSlot = lo;  // next free slot; lo==0 means fresh flash, lo==META_SLOT_COUNT means sector full
+
+  if (lo == 0) {
     writeIdx = 0; totalWritten = 0;
-    flashWriteMeta();
     Serial.println("Flash: initialized fresh (capacity ~727 days at 2 min interval)");
   } else {
-    Serial.printf("Flash: resuming at record %u (total %u)\n", writeIdx, totalWritten);
+    uint32_t lastAddr = (uint32_t)(lo - 1) * META_SLOT_SIZE;
+    flash.readAnything(lastAddr,     writeIdx);
+    flash.readAnything(lastAddr + 4, totalWritten);
+    Serial.printf("Flash: resuming at record %u (total %u), meta slot %u/%u\n",
+                  writeIdx, totalWritten, metaSlot, (uint16_t)META_SLOT_COUNT);
   }
   digitalWrite(WRITE_LED, LOW);
 }
@@ -343,6 +372,7 @@ void handleFlashReset() {
   flash.eraseSector(0);
   writeIdx     = 0;
   totalWritten = 0;
+  metaSlot     = 0;
   flashWriteMeta();
   digitalWrite(WRITE_LED, LOW);
   Serial.println("Flash reset by user");
@@ -642,7 +672,7 @@ void loop() {
           Serial.println("Physical button: flash reset");
           digitalWrite(WRITE_LED, HIGH);
           flash.eraseSector(0);  // metadata sector only — data sectors erased on next write
-          writeIdx = 0; totalWritten = 0;
+          writeIdx = 0; totalWritten = 0; metaSlot = 0;
           flashWriteMeta();
           digitalWrite(WRITE_LED, LOW);
           lcd.setCursor(0, 1);
