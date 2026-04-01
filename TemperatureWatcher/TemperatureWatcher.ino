@@ -276,16 +276,30 @@ void handleStats() {
   server.sendContent_P(PSTR("<svg viewBox='0 0 500 75' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"));
   snprintf(buf, sizeof(buf), "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>", tmax);
   server.sendContent(buf);
-  server.sendContent_P(PSTR("<polyline points='"));
-
-  for (int i = (int)n - 1; i >= 0; i--) {
-    float x = (n < 2) ? 250 : (float)((int)n - 1 - i) / (n - 1) * 490 + 5;
-    float y = (tmax == tmin) ? 40 : 5 + (tmax - recs[i].temp) / (tmax - tmin) * 65;
-    char pt[16];
-    snprintf(pt, sizeof(pt), "%.0f,%.0f ", x, y);
-    server.sendContent(pt);
+  // Smooth curve via Catmull-Rom → cubic Bezier.
+  // recs[0]=newest, recs[n-1]=oldest; step k=0 → recs[n-1] (left/oldest).
+  server.sendContent_P(PSTR("<path d='"));
+  {
+    float alpha = (n > 1) ? 490.0f / (float)(n - 1) : 0.0f;
+    auto ptX = [&](int k) -> float { return (n < 2) ? 250.0f : k * alpha + 5.0f; };
+    auto ptY = [&](int k) -> float {
+      int idx = n - 1 - k;
+      return (tmax == tmin) ? 40.0f : 5.0f + (tmax - recs[idx].temp) / (tmax - tmin) * 65.0f;
+    };
+    snprintf(buf, sizeof(buf), "M%d,%.1f", (n < 2 ? 250 : 5), ptY(0));
+    server.sendContent(buf);
+    for (int k = 0; k < (int)n - 1; k++) {
+      int km1 = (k > 0)            ? k - 1 : 0;
+      int k2  = (k + 2 < (int)n)  ? k + 2 : n - 1;
+      float cp1x = ptX(k)   + (ptX(k+1) - ptX(km1)) / 6.0f;
+      float cp1y = ptY(k)   + (ptY(k+1) - ptY(km1)) / 6.0f;
+      float cp2x = ptX(k+1) - (ptX(k2)  - ptX(k))   / 6.0f;
+      float cp2y = ptY(k+1) - (ptY(k2)  - ptY(k))   / 6.0f;
+      snprintf(buf, sizeof(buf), " C%.1f,%.1f %.1f,%.1f %.1f,%.1f",
+               cp1x, cp1y, cp2x, cp2y, ptX(k+1), ptY(k+1));
+      server.sendContent(buf);
+    }
   }
-
   server.sendContent_P(PSTR("' fill='none' stroke='#e94560' stroke-width='2'/>"));
   snprintf(buf, sizeof(buf), "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>", tmin);
   server.sendContent(buf);
