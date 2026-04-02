@@ -624,19 +624,22 @@ scan();
 
 void handleScan() {
   int n = WiFi.scanNetworks();
-  String json = "[";
+  // Fixed stack buffer — no heap String reallocs. 30 networks × ~70 bytes/entry + brackets < 2200 bytes.
+  char json[2200];
+  uint16_t len = 0;
+  json[len++] = '[';
   for (int i = 0; i < n; i++) {
-    if (i > 0) json += ",";
+    if (len > sizeof(json) - 80) break;  // guard: stop before buffer full
+    if (i > 0) json[len++] = ',';
     String s = WiFi.SSID(i);
-    // Escape double quotes in SSID
     s.replace("\"", "\\\"");
     bool enc = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-    char entry[128];
-    snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%d,\"enc\":%d}",
-             s.c_str(), WiFi.RSSI(i), enc ? 1 : 0);
-    json += entry;
+    len += snprintf(json + len, sizeof(json) - len,
+                    "{\"ssid\":\"%s\",\"rssi\":%d,\"enc\":%d}",
+                    s.c_str(), WiFi.RSSI(i), enc ? 1 : 0);
   }
-  json += "]";
+  json[len++] = ']';
+  json[len]   = '\0';
   server.sendHeader("Cache-Control", "no-cache");
   server.send(200, "application/json", json);
 }
@@ -849,12 +852,13 @@ void loop() {
   if (millis() - lastLcdMs >= 500) {
     lastLcdMs = millis();
 
-    // Read sensor
+    // Read sensor — readAltitude() internally calls readPressure() again,
+    // so compute altitude from the already-read rawPressure instead (saves one full BMP180 cycle, ~25 ms)
     temp = bmp.readTemperature();
     int32_t rawPressure = bmp.readPressure();
     pressureHPa  = rawPressure / 100.0f;
     pressureMmHg = rawPressure / 133.322f;
-    altitude     = bmp.readAltitude();
+    altitude     = 44330.0f * (1.0f - powf((float)rawPressure / 101325.0f, 0.1903f));
 
     // Toggle LED on each sensor read
     ledState = !ledState;
