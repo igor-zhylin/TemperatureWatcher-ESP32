@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <WiFi.h>
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_BMP085.h>
@@ -8,8 +9,8 @@
 
 // ===== Wi-Fi credentials (defined in secrets.h, not tracked by git) =====
 #include "secrets.h"
-const char* ssid     = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
+char ssid[33]     = {};
+char password[65] = {};
 
 // Main LCD — sensor data (address 0x27)
 LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -39,9 +40,11 @@ float altitude = 0;
 // Wiring: MOSI=23, MISO=19, SCK=18, CS=5 (default ESP32 VSPI)
 #define FLASH_CS         5
 #define RECORDS_ADDR     4096UL    // records start at sector 1 (after metadata sector)
-#define MAX_RECORDS      524032    // 8MB flash: (8388608-4096)/16 = 524032 records
+#define MAX_RECORDS      523776    // 8MB flash: last sector reserved for credentials
+#define CREDS_ADDR       8384512UL // last sector of W25Q64 (sector 2047 * 4096)
 #define RECORD_SIZE      16        // sizeof(Record) — must stay 16
-#define SAVE_INTERVAL    120000UL  // 2 minutes in ms — 524032 records ≈ 727 days
+#define SAVE_INTERVAL    120000UL  // 2 minutes in ms — 523776 records ≈ 727 days
+#define CREDS_MAGIC      0xC0FFEE01u
 // Wear leveling for metadata sector (sector 0, 4096 bytes):
 // 512 slots × 8 bytes — write appends to next slot, erase only when sector is full.
 // Reduces erase frequency 512× (every ~17 h instead of every 2 min → ~190 years).
@@ -49,6 +52,12 @@ float altitude = 0;
 #define META_SLOT_COUNT  (4096 / META_SLOT_SIZE)  // 512 slots per erase cycle
 
 SPIFlash flash(FLASH_CS);
+
+struct CredsRecord {
+  uint32_t magic;
+  char     ssid[33];
+  char     password[65];
+};
 
 struct Record {           // 16 bytes
   uint32_t timestamp;     // Unix time (Kyiv)
@@ -63,6 +72,10 @@ uint16_t metaSlot     = 0;  // current slot index in sector 0 (0..META_SLOT_COUN
 uint32_t lastSaveMs   = 0;
 uint32_t lastLcdMs    = 0;
 bool     flashOK      = false;
+
+// AP mode / captive portal state
+DNSServer dnsServer;
+bool      apMode = false;
 
 // Wi-Fi reconnect state
 #define  WIFI_RETRY_INTERVAL  120000UL  // 2 minutes between retries
@@ -165,6 +178,31 @@ void flashInit() {
                   writeIdx, totalWritten, metaSlot, (uint16_t)META_SLOT_COUNT);
   }
   digitalWrite(WRITE_LED, LOW);
+}
+
+// Read WiFi credentials from the last flash sector.
+// Returns true and populates global ssid/password if magic matches.
+bool readCredsFromFlash() {
+  CredsRecord c;
+  flash.readAnything(CREDS_ADDR, c);
+  if (c.magic != CREDS_MAGIC) return false;
+  c.ssid[32]     = '\0';
+  c.password[64] = '\0';
+  strncpy(ssid,     c.ssid,     32);  ssid[32]     = '\0';
+  strncpy(password, c.password, 64);  password[64] = '\0';
+  return true;
+}
+
+// Save WiFi credentials to the last flash sector (erases sector first).
+void saveCredsToFlash(const char* s, const char* p) {
+  CredsRecord c;
+  c.magic = CREDS_MAGIC;
+  memset(c.ssid,     0, sizeof(c.ssid));
+  memset(c.password, 0, sizeof(c.password));
+  strncpy(c.ssid,     s, 32);
+  strncpy(c.password, p, 64);
+  flash.eraseSector(CREDS_ADDR);
+  flash.writeAnything(CREDS_ADDR, c);
 }
 
 void flashSaveRecord() {
@@ -470,6 +508,118 @@ void handleApi() {
   server.send(200, "application/json", json);
 }
 
+// ===== Captive portal provisioning handlers (AP mode only) =====
+
+void handleProvision() {
+  server.sendHeader("Cache-Control", "no-cache");
+  server.send_P(200, "text/html", R"rawliteral(<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TempWatcher Setup</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;
+display:flex;justify-content:center;align-items:center;min-height:100vh}
+.card{background:#16213e;border-radius:16px;padding:32px 40px;
+box-shadow:0 8px 32px rgba(0,0,0,.4);min-width:320px;width:100%;max-width:420px}
+h1{text-align:center;margin-bottom:8px;font-size:1.3em;color:#e94560}
+.sub{text-align:center;color:#888;font-size:.85em;margin-bottom:20px}
+label{display:block;color:#888;font-size:.85em;margin-bottom:4px;margin-top:14px}
+input{width:100%;padding:10px 12px;background:#0f0f1e;border:1px solid #2a2a4a;
+border-radius:8px;color:#eee;font-size:1em;outline:none}
+input:focus{border-color:#e94560}
+#networks{margin-top:16px;max-height:200px;overflow-y:auto;border:1px solid #2a2a4a;
+border-radius:8px;background:#0f0f1e}
+.net{display:flex;justify-content:space-between;align-items:center;
+padding:10px 14px;cursor:pointer;border-bottom:1px solid #1a1a2e;font-size:.9em}
+.net:last-child{border-bottom:none}
+.net:hover{background:#16213e}
+.net .name{flex:1}
+.net .meta{color:#888;font-size:.8em;margin-left:8px}
+.lock{color:#e94560;margin-left:6px;font-size:.85em}
+button{margin-top:20px;width:100%;padding:12px;background:#e94560;border:none;
+border-radius:8px;color:#fff;font-size:1em;cursor:pointer;font-weight:bold}
+button:hover{background:#c73652}
+#status{margin-top:12px;text-align:center;font-size:.85em;color:#888}
+#scan-btn{margin-top:12px;width:100%;padding:8px;background:#2a2a4a;border:none;
+border-radius:8px;color:#aaa;font-size:.85em;cursor:pointer}
+#scan-btn:hover{background:#3a3a5a}
+</style></head><body>
+<div class="card">
+<h1>WiFi Setup</h1>
+<div class="sub">Connect TempWatcher to your network</div>
+<div id="networks"><div class="net" style="color:#555;cursor:default">Scanning...</div></div>
+<button id="scan-btn" onclick="scan()">Scan again</button>
+<label for="ssid-in">Network name (SSID)</label>
+<input id="ssid-in" type="text" placeholder="Enter SSID" maxlength="32">
+<label for="pw-in">Password</label>
+<input id="pw-in" type="password" placeholder="Leave empty for open network" maxlength="64">
+<button onclick="save()">Save &amp; Connect</button>
+<div id="status"></div>
+</div>
+<script>
+function scan(){
+  document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scanning...</div>';
+  fetch('/scan').then(r=>r.json()).then(nets=>{
+    if(!nets.length){document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">No networks found</div>';return;}
+    document.getElementById('networks').innerHTML=nets.map(n=>{
+      var lock=n.enc?'<span class="lock">&#128274;</span>':'';
+      return '<div class="net" onclick="pick(\''+n.ssid.replace(/'/g,"\\'")+'\')">'
+        +'<span class="name">'+escH(n.ssid)+lock+'</span>'
+        +'<span class="meta">'+n.rssi+' dBm</span></div>';
+    }).join('');
+  }).catch(()=>{document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scan failed</div>';});
+}
+function escH(s){var d=document.createElement('div');d.appendChild(document.createTextNode(s));return d.innerHTML;}
+function pick(s){document.getElementById('ssid-in').value=s;document.getElementById('pw-in').focus();}
+function save(){
+  var s=document.getElementById('ssid-in').value.trim();
+  var p=document.getElementById('pw-in').value;
+  if(!s){document.getElementById('status').textContent='Please enter an SSID.';return;}
+  document.getElementById('status').textContent='Saving...';
+  var fd=new FormData();fd.append('ssid',s);fd.append('password',p);
+  fetch('/save',{method:'POST',body:fd}).then(r=>{
+    if(r.ok){document.getElementById('status').textContent='Saved! Device is restarting...';}
+    else{document.getElementById('status').textContent='Error saving credentials.';}
+  }).catch(()=>{document.getElementById('status').textContent='Saved! Device is restarting...';});
+}
+scan();
+</script>
+</body></html>)rawliteral");
+}
+
+void handleScan() {
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    String s = WiFi.SSID(i);
+    // Escape double quotes in SSID
+    s.replace("\"", "\\\"");
+    bool enc = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    char entry[128];
+    snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%d,\"enc\":%d}",
+             s.c_str(), WiFi.RSSI(i), enc ? 1 : 0);
+    json += entry;
+  }
+  json += "]";
+  server.sendHeader("Cache-Control", "no-cache");
+  server.send(200, "application/json", json);
+}
+
+void handleSave() {
+  if (!server.hasArg("ssid")) {
+    server.send(400, "text/plain", "Missing ssid");
+    return;
+  }
+  String s = server.arg("ssid");
+  String p = server.arg("password");
+  saveCredsToFlash(s.c_str(), p.c_str());
+  server.send(200, "text/plain", "OK");
+  delay(500);
+  ESP.restart();
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
@@ -479,6 +629,15 @@ void setup() {
 
   // Initialize W25Q64 flash
   flashInit();
+
+  // Load WiFi credentials: start with compile-time defaults, override from flash if valid
+  strncpy(ssid,     WIFI_SSID,     32);  ssid[32]     = '\0';
+  strncpy(password, WIFI_PASSWORD, 64);  password[64] = '\0';
+  if (flashOK && readCredsFromFlash()) {
+    Serial.printf("Loaded credentials from flash: SSID=%s\n", ssid);
+  } else {
+    Serial.printf("Using compile-time credentials: SSID=%s\n", ssid);
+  }
 
   // Initialize LCDs
   lcd.init();
@@ -524,7 +683,7 @@ void setup() {
   int attempts = 0;
   int lastStatus = -1;
 
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
     delay(1000);
     attempts++;
 
@@ -538,11 +697,11 @@ void setup() {
       lcd.print(wifiStatusToString(status));
       lcd.print(" (");
       lcd.print(attempts);
-      lcd.print("/30)");
+      lcd.print("/15)");
       lastStatus = status;
     }
 
-    Serial.printf("  Attempt %d/30 - Status: %s (%d)\n",
+    Serial.printf("  Attempt %d/15 - Status: %s (%d)\n",
                   attempts, wifiStatusToString(status), status);
 
     // Blink LED while connecting
@@ -554,15 +713,29 @@ void setup() {
   lcd.clear();
 
   if (WiFi.status() != WL_CONNECTED) {
-    // Don't hang — loop() will retry every WIFI_RETRY_INTERVAL
-    lcd.setCursor(0, 0); lcd.print("WiFi FAILED!");
-    lcd.setCursor(0, 1); lcd.print("Err: ");
-    lcd.print(wifiStatusToString(WiFi.status()));
-    lcd.setCursor(0, 2); lcd.print("Retry every 2 min");
-    Serial.printf("WiFi FAILED (%s) — retrying in loop()\n",
-                  wifiStatusToString(WiFi.status()));
-    delay(2000);
-    lcd.clear();
+    // 15 attempts failed — start captive portal AP mode
+    Serial.println("WiFi FAILED — starting AP captive portal");
+    apMode = true;
+
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP("TempWatcher");
+    IPAddress apIP = WiFi.softAPIP();
+
+    dnsServer.start(53, "*", apIP);
+
+    // Register provisioning routes only
+    server.on("/",     handleProvision);
+    server.on("/scan", handleScan);
+    server.on("/save", HTTP_POST, handleSave);
+    server.onNotFound(handleProvision);
+    server.begin();
+
+    Serial.printf("AP mode active, IP: %s\n", apIP.toString().c_str());
+
+    // Show AP info on lcd2 (16x2)
+    lcd2.clear();
+    lcd2.setCursor(0, 0); lcd2.print("AP: TempWatcher ");
+    lcd2.setCursor(0, 1); lcd2.print(apIP.toString());
   } else {
     // ===== WiFi connected =====
     Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
@@ -595,33 +768,29 @@ void setup() {
     }
     delay(1500);
     lcd.clear();
-  }
 
-  // Setup web server routes (always — reachable once WiFi is up)
-  server.on("/", handleRoot);
-  server.on("/api", handleApi);
-  server.on("/stats", handleStats);
-  server.on("/export", handleExport);
-  server.on("/reset-flash", handleFlashReset);
-  server.begin();
+    // Setup normal web server routes
+    server.on("/", handleRoot);
+    server.on("/api", handleApi);
+    server.on("/stats", handleStats);
+    server.on("/export", handleExport);
+    server.on("/reset-flash", handleFlashReset);
+    server.begin();
 
-  Serial.println("HTTP server started");
+    Serial.println("HTTP server started");
 
-  // Show network info on second LCD 1602
-  // Row 0: "WiFi: " + SSID — scrolls in loop() if longer than 10 chars
-  // Row 1: "IP: <address>"  — scrolls in loop() if longer than 12 chars
-  strncpy(lcd2SsidVal, ssid, 32);
-  lcd2SsidVal[32] = '\0';
-  lcd2.clear();
-  lcd2.setCursor(0, 0); lcd2.print("WiFi: ");
-  lcd2.setCursor(6, 0); lcd2.print(lcd2SsidVal);
-  if (WiFi.status() == WL_CONNECTED) {
+    // Show network info on second LCD 1602
+    // Row 0: "WiFi: " + SSID — scrolls in loop() if longer than 10 chars
+    // Row 1: "IP: <address>"  — scrolls in loop() if longer than 12 chars
+    strncpy(lcd2SsidVal, ssid, 32);
+    lcd2SsidVal[32] = '\0';
+    lcd2.clear();
+    lcd2.setCursor(0, 0); lcd2.print("WiFi: ");
+    lcd2.setCursor(6, 0); lcd2.print(lcd2SsidVal);
     strncpy(lcd2IpVal, WiFi.localIP().toString().c_str(), 15);
     lcd2IpVal[15] = '\0';
     lcd2.setCursor(0, 1); lcd2.print("IP: ");
     lcd2.setCursor(4, 1); lcd2.print(lcd2IpVal);
-  } else {
-    lcd2.setCursor(0, 1); lcd2.print("IP: connecting..");
   }
 
   delay(2000);
@@ -629,6 +798,9 @@ void setup() {
 }
 
 void loop() {
+  // In AP mode: process DNS redirects for captive portal
+  if (apMode) dnsServer.processNextRequest();
+
   // Handle incoming HTTP requests
   server.handleClient();
 
@@ -712,7 +884,8 @@ void loop() {
   }
 
   // ===== Wi-Fi watchdog — reconnect every WIFI_RETRY_INTERVAL when disconnected =====
-  if (WiFi.status() != WL_CONNECTED) {
+  // Skipped in AP mode — reconnect is handled via captive portal provisioning
+  if (!apMode && WiFi.status() != WL_CONNECTED) {
     if (!wifiWasLost) {
       wifiWasLost    = true;
       wifiRetryCount = 0;
@@ -737,7 +910,7 @@ void loop() {
       delay(100);
       WiFi.begin(ssid, password);
     }
-  } else if (wifiWasLost) {
+  } else if (!apMode && wifiWasLost) {
     // Just reconnected
     wifiWasLost = false;
     Serial.printf("WiFi reconnected after %u retries! IP: %s\n",
@@ -761,8 +934,8 @@ void loop() {
   // Scroll LCD2 values if they overflow their column window (bounce left↔right every 400 ms)
   // Row 0: "WiFi: " fixed at cols 0-5, SSID scrolls in cols 6-15 (10 chars)
   // Row 1: "IP: "   fixed at cols 0-3, IP   scrolls in cols 4-15 (12 chars)
-  // Suppressed during WiFi loss — retry message must stay visible
-  if (!wifiWasLost && millis() - lcd2ScrollMs >= 400) {
+  // Suppressed during WiFi loss and in AP mode — status messages must stay visible
+  if (!apMode && !wifiWasLost && millis() - lcd2ScrollMs >= 400) {
     lcd2ScrollMs = millis();
     lcd2ScrollTick(lcd2SsidScroll, lcd2SsidVal, 6, 0, 10);
     lcd2ScrollTick(lcd2IpScroll,   lcd2IpVal,   4, 1, 12);
