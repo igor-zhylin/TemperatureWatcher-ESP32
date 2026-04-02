@@ -64,6 +64,12 @@ uint32_t lastSaveMs   = 0;
 uint32_t lastLcdMs    = 0;
 bool     flashOK      = false;
 
+// Wi-Fi reconnect state
+#define  WIFI_RETRY_INTERVAL  120000UL  // 2 minutes between retries
+uint32_t wifiRetryMs    = 0;
+uint16_t wifiRetryCount = 0;
+bool     wifiWasLost    = false;
+
 // LCD2 scroll state — prefixes "WiFi: " and "IP: " are static; only values scroll
 char lcd2SsidVal[33] = {};  // SSID only, up to 32 chars
 char lcd2IpVal[16]   = {};  // IP address only, up to 15 chars
@@ -531,59 +537,50 @@ void setup() {
   lcd.clear();
 
   if (WiFi.status() != WL_CONNECTED) {
-    lcd.setCursor(0, 0);
-    lcd.print("=== WiFi FAILED ===");
-    lcd.setCursor(0, 1);
-    lcd.print("SSID: ");
-    lcd.print(ssid);
-    lcd.setCursor(0, 2);
-    lcd.print("Err: ");
+    // Don't hang — loop() will retry every WIFI_RETRY_INTERVAL
+    lcd.setCursor(0, 0); lcd.print("WiFi FAILED!");
+    lcd.setCursor(0, 1); lcd.print("Err: ");
     lcd.print(wifiStatusToString(WiFi.status()));
-    lcd.setCursor(0, 3);
-    lcd.print("Restart to retry");
-
-    Serial.println("WiFi connection FAILED!");
-    Serial.printf("Last status: %s (%d)\n", wifiStatusToString(WiFi.status()), WiFi.status());
-
-    while (1) { 
-      delay(1000); 
-    }
-  }
-
-  // ===== WiFi connected =====
-  Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString());
-
-  // ===== NTP time sync (Kyiv: UTC+2 winter / UTC+3 summer) =====
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Syncing time...");
-  Serial.println("Syncing NTP...");
-
-  configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
-
-  struct tm ti;
-  int ntpAttempts = 0;
-  while (!getLocalTime(&ti) && ntpAttempts < 20) {
-    delay(500);
-    ntpAttempts++;
-  }
-
-  if (getLocalTime(&ti)) {
-    char buf[20];
-    strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &ti);
-    Serial.printf("Time synced: %s\n", buf);
-    lcd.setCursor(0, 1);
-    lcd.print("OK: ");
-    lcd.print(buf);
+    lcd.setCursor(0, 2); lcd.print("Retry every 2 min");
+    Serial.printf("WiFi FAILED (%s) — retrying in loop()\n",
+                  wifiStatusToString(WiFi.status()));
+    delay(2000);
+    lcd.clear();
   } else {
-    Serial.println("NTP sync failed, timestamps will be 0");
-    lcd.setCursor(0, 1);
-    lcd.print("NTP FAIL, continuing");
-  }
-  delay(1500);
-  lcd.clear();
+    // ===== WiFi connected =====
+    Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-  // Setup web server routes
+    // ===== NTP time sync (Kyiv: UTC+2 winter / UTC+3 summer) =====
+    lcd.setCursor(0, 0);
+    lcd.print("Syncing time...");
+    Serial.println("Syncing NTP...");
+
+    configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+
+    struct tm ti;
+    int ntpAttempts = 0;
+    while (!getLocalTime(&ti) && ntpAttempts < 20) {
+      delay(500);
+      ntpAttempts++;
+    }
+
+    if (getLocalTime(&ti)) {
+      char buf[20];
+      strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &ti);
+      Serial.printf("Time synced: %s\n", buf);
+      lcd.setCursor(0, 1);
+      lcd.print("OK: ");
+      lcd.print(buf);
+    } else {
+      Serial.println("NTP sync failed, timestamps will be 0");
+      lcd.setCursor(0, 1);
+      lcd.print("NTP FAIL, continuing");
+    }
+    delay(1500);
+    lcd.clear();
+  }
+
+  // Setup web server routes (always — reachable once WiFi is up)
   server.on("/", handleRoot);
   server.on("/api", handleApi);
   server.on("/stats", handleStats);
@@ -594,19 +591,21 @@ void setup() {
   Serial.println("HTTP server started");
 
   // Show network info on second LCD 1602
-  // Row 0: "WiFi: " + SSID (truncated to 10 chars → fits in 16 cols, static)
-  // Row 1: "IP: <address>" — scrolls left/right in loop() if longer than 16 chars
+  // Row 0: "WiFi: " + SSID — scrolls in loop() if longer than 10 chars
+  // Row 1: "IP: <address>"  — scrolls in loop() if longer than 12 chars
   strncpy(lcd2SsidVal, ssid, 32);
   lcd2SsidVal[32] = '\0';
-  strncpy(lcd2IpVal, WiFi.localIP().toString().c_str(), 15);
-  lcd2IpVal[15] = '\0';
-
-  // Static prefixes + initial value paint (scroll takes over in loop if value is too long)
   lcd2.clear();
   lcd2.setCursor(0, 0); lcd2.print("WiFi: ");
-  lcd2.setCursor(0, 1); lcd2.print("IP: ");
   lcd2.setCursor(6, 0); lcd2.print(lcd2SsidVal);
-  lcd2.setCursor(4, 1); lcd2.print(lcd2IpVal);
+  if (WiFi.status() == WL_CONNECTED) {
+    strncpy(lcd2IpVal, WiFi.localIP().toString().c_str(), 15);
+    lcd2IpVal[15] = '\0';
+    lcd2.setCursor(0, 1); lcd2.print("IP: ");
+    lcd2.setCursor(4, 1); lcd2.print(lcd2IpVal);
+  } else {
+    lcd2.setCursor(0, 1); lcd2.print("IP: connecting..");
+  }
 
   delay(2000);
   lcdDrawLabels();
@@ -695,10 +694,58 @@ void loop() {
     lastSaveMs = millis();
   }
 
+  // ===== Wi-Fi watchdog — reconnect every WIFI_RETRY_INTERVAL when disconnected =====
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiWasLost) {
+      wifiWasLost    = true;
+      wifiRetryCount = 0;
+      wifiRetryMs    = millis() - WIFI_RETRY_INTERVAL;  // first retry fires immediately
+      Serial.println("WiFi connection lost!");
+    }
+    if (millis() - wifiRetryMs >= WIFI_RETRY_INTERVAL) {
+      wifiRetryCount++;
+      wifiRetryMs = millis();
+      int wifiErr = WiFi.status();
+      Serial.printf("WiFi retry #%u — %s\n", wifiRetryCount, wifiStatusToString(wifiErr));
+      // Row 0: "WiFi:RETRY #NNN " (16 chars)
+      // Row 1: error string, left-padded to 16 chars
+      char buf[17];
+      lcd2.clear();
+      snprintf(buf, sizeof(buf), "WiFi:RETRY #%-4u", wifiRetryCount);
+      lcd2.setCursor(0, 0); lcd2.print(buf);
+      snprintf(buf, sizeof(buf), "%-16s", wifiStatusToString(wifiErr));
+      lcd2.setCursor(0, 1); lcd2.print(buf);
+      // Attempt reconnect
+      WiFi.disconnect();
+      delay(100);
+      WiFi.begin(ssid, password);
+    }
+  } else if (wifiWasLost) {
+    // Just reconnected
+    wifiWasLost = false;
+    Serial.printf("WiFi reconnected after %u retries! IP: %s\n",
+                  wifiRetryCount, WiFi.localIP().toString().c_str());
+    wifiRetryCount = 0;
+    // Re-sync NTP (was skipped while offline)
+    configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+    // Restore lcd2 to normal network display
+    strncpy(lcd2IpVal, WiFi.localIP().toString().c_str(), 15);
+    lcd2IpVal[15] = '\0';
+    lcd2SsidScroll = {0, 1, 0};
+    lcd2IpScroll   = {0, 1, 0};
+    lcd2ScrollMs   = 0;
+    lcd2.clear();
+    lcd2.setCursor(0, 0); lcd2.print("WiFi: ");
+    lcd2.setCursor(0, 1); lcd2.print("IP: ");
+    lcd2.setCursor(6, 0); lcd2.print(lcd2SsidVal);
+    lcd2.setCursor(4, 1); lcd2.print(lcd2IpVal);
+  }
+
   // Scroll LCD2 values if they overflow their column window (bounce left↔right every 400 ms)
   // Row 0: "WiFi: " fixed at cols 0-5, SSID scrolls in cols 6-15 (10 chars)
   // Row 1: "IP: "   fixed at cols 0-3, IP   scrolls in cols 4-15 (12 chars)
-  if (millis() - lcd2ScrollMs >= 400) {
+  // Suppressed during WiFi loss — retry message must stay visible
+  if (!wifiWasLost && millis() - lcd2ScrollMs >= 400) {
     lcd2ScrollMs = millis();
     lcd2ScrollTick(lcd2SsidScroll, lcd2SsidVal, 6, 0, 10);
     lcd2ScrollTick(lcd2IpScroll,   lcd2IpVal,   4, 1, 12);
