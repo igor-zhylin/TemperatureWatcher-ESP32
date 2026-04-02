@@ -231,7 +231,7 @@ const char* wifiStatusToString(int status) {
   }
 }
 
-// Serve the main page — values updated via fetch('/api'), no full reload
+// Serve the main page — values updated via fetch('/api/data'), no full reload
 void handleRoot() {
   // Page is static HTML — browser can cache it; values come from /api via JS
   server.sendHeader("Cache-Control", "max-age=3600");
@@ -258,11 +258,11 @@ void handleRoot() {
         <div class="row"><span class="label">Pressure</span><span class="value" id="p1">…</span></div>
         <div class="row"><span class="label">Pressure</span><span class="value" id="p2">…</span></div>
         <div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
-        <div class="footer"><span id="ts"></span> | <a href="/stats">History</a></div>
+        <div class="footer"><span id="ts"></span> | <a href="/api/stats">History</a> | <a href="/wifi-setup">WiFi</a></div>
         </div>
         <script>
         function upd(){
-          fetch('/api').then(r=>r.json()).then(d=>{
+          fetch('/api/data').then(r=>r.json()).then(d=>{
             document.getElementById('t').textContent=d.temperature_c+' \u00b0C';
             document.getElementById('p1').textContent=d.pressure_hpa+' hPa';
             document.getElementById('p2').textContent=d.pressure_mmhg+' mmHg';
@@ -429,8 +429,8 @@ void handleStats() {
   }
 
   ap("</table><div style='text-align:center'>"
-     "<a class='btn' href='/export'>Download CSV</a>&nbsp;&nbsp;"
-     "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
+     "<a class='btn' href='/api/export'>Download CSV</a>&nbsp;&nbsp;"
+     "<a class='btn' href='/api/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
      "Reset Flash</a></div></div></body></html>");
   flush();
   client.stop();
@@ -453,7 +453,7 @@ void handleFlashReset() {
   flashWriteMeta();
   digitalWrite(WRITE_LED, LOW);
   Serial.println("Flash reset by user");
-  server.sendHeader("Location", "/stats");
+  server.sendHeader("Location", "/api/stats");
   server.send(303);
 }
 
@@ -791,10 +791,13 @@ void setup() {
 
     // Setup normal web server routes
     server.on("/", handleRoot);
-    server.on("/api", handleApi);
-    server.on("/stats", handleStats);
-    server.on("/export", handleExport);
-    server.on("/reset-flash", handleFlashReset);
+    server.on("/api/data", handleApi);
+    server.on("/api/stats", handleStats);
+    server.on("/api/export", handleExport);
+    server.on("/api/reset-flash", handleFlashReset);
+    server.on("/wifi-setup", handleProvision);
+    server.on("/scan", handleScan);
+    server.on("/save", HTTP_POST, handleSave);
     server.begin();
 
     Serial.println("HTTP server started");
