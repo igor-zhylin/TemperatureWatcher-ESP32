@@ -10,11 +10,12 @@ ESP32-based weather station that reads temperature, atmospheric pressure, and al
 - **Two I2C LCD displays**
   - LCD 2004 (20×4) — live sensor readings, updated every 500 ms
   - LCD 1602 (16×2) — Wi-Fi SSID and IP address; scrolls long values
-- **Web interface** — live readings page + history page with temperature chart + CSV export
+- **Web interface** — live readings, history with temperature chart, CSV export; consistent nav bar across all pages
 - **8 MB SPI flash logging** — record saved every 2 minutes, capacity ~727 days
 - **Flash wear leveling** — metadata sector endurance extended ~190 years (see below)
 - **Physical reset button** — hold 2 s on GPIO 4 to erase all flash records
-- **Wi-Fi reconnect** — if connection drops, retries every 2 minutes automatically; lcd2 shows retry counter and error code
+- **Wi-Fi provisioning** — on first boot (or after 15 failed attempts) the device starts an open AP `TempWatcher` at `192.168.0.1`; connect to it, open the browser, pick a network and enter the password; credentials are saved to flash and used on every subsequent boot
+- **Wi-Fi reconnect** — if connection drops at runtime, retries every 2 minutes automatically; lcd2 shows retry counter and error code
 
 ---
 
@@ -38,18 +39,17 @@ Full pin-by-pin wiring: see **[WIRING.md](WIRING.md)**
 
 ### 1. Wi-Fi credentials
 
-```bash
-cp TemperatureWatcher/secrets.h.example TemperatureWatcher/secrets.h
-```
+Wi-Fi is configured at runtime via the built-in captive portal — no `secrets.h` needed.
 
-Edit `secrets.h`:
+On first boot (or whenever saved credentials are missing or fail 15 times):
 
-```cpp
-#define WIFI_SSID     "your_network_name"
-#define WIFI_PASSWORD "your_password"
-```
+1. The device starts an open Wi-Fi access point named **TempWatcher**
+2. Connect to it from your phone or laptop
+3. Open **`192.168.0.1`** in a browser (most phones open it automatically)
+4. Select your network, enter the password, press **Save & Connect**
+5. Credentials are written to flash — the device restarts and connects automatically from then on
 
-`secrets.h` is gitignored and never committed.
+To reconfigure, visit **`/wifi-setup`** from the main web interface at any time.
 
 ### 2. Arduino IDE libraries
 
@@ -65,21 +65,22 @@ Board: **ESP32 Dev Module** (esp32 by Espressif, ≥ 2.x)
 
 ### 3. Flash and run
 
-Select the correct COM port, upload. On first boot the device connects to Wi-Fi, syncs NTP (Kyiv timezone, UTC+2/+3), and starts the web server.
+Select the correct COM port, upload. On first boot the device starts in AP provisioning mode (see step 1). After credentials are saved it connects to Wi-Fi, syncs NTP (Kyiv timezone, UTC+2/+3), and starts the web server.
 
 ---
 
 ## Web Interface
 
-Open the IP address shown on lcd2 in a browser.
+Open the IP address shown on lcd2 in a browser. All pages share a navigation bar (Live / History / WiFi).
 
 | Route | Description |
 |---|---|
 | `/` | Live readings, auto-refreshes every 5 s |
-| `/stats` | Last 50 records with temperature chart |
-| `/export` | Download all records as `data.csv` |
-| `/reset-flash` | Erase flash history (confirmation dialog) |
-| `/api` | JSON endpoint: `{"temperature_c":…,"pressure_hpa":…,"pressure_mmhg":…,"altitude_m":…}` |
+| `/api/stats` | Last 50 records with temperature chart and time axis |
+| `/api/export` | Download all records as `data.csv` |
+| `/api/reset-flash` | Erase flash history (confirmation dialog) |
+| `/api/data` | JSON endpoint: `{"temperature_c":…,"pressure_hpa":…,"pressure_mmhg":…,"altitude_m":…}` |
+| `/wifi-setup` | Wi-Fi provisioning page — scan networks, pick one, save credentials |
 
 ---
 
@@ -90,11 +91,21 @@ Records are written to W25Q64 every 2 minutes.
 | Parameter | Value |
 |---|---|
 | Record size | 16 bytes (timestamp, temp, pressure hPa, altitude) |
-| Max records | 524 032 |
+| Max records | 523 776 |
 | Total capacity | ~727 days at 2 min interval |
 | Timestamp | Unix time, Kyiv timezone |
 
-Records wrap around when full (oldest overwritten first). The `/stats` page shows the 50 most recent; `/export` downloads everything.
+Records wrap around when full (oldest overwritten first). The `/api/stats` page shows the 50 most recent; `/api/export` downloads everything.
+
+**Flash sector layout:**
+
+| Sector | Address | Size | Purpose |
+|---|---|---|---|
+| 0 | 0 – 4 095 | 4 KB | Metadata wear-leveling (write index + record count) |
+| 1 – 2046 | 4 096 – 8 384 511 | ~8 MB | Data records |
+| 2047 | 8 384 512 – 8 388 607 | 4 KB | Wi-Fi credentials (SSID + password) |
+
+Capacity calculation: `(8 388 608 − 4 096 − 4 096) ÷ 16 bytes = 523 776 records × 2 min = 727 days`
 
 ---
 
@@ -131,7 +142,7 @@ Row 0 shows the retry counter, row 1 shows the status string from the Wi-Fi driv
 
 ## Metadata Wear Leveling
 
-The W25Q64 SPI flash stores sensor records starting at sector 1. Sector 0 is reserved for metadata (current write index and total record count). Flash memory has a limited erase endurance of approximately 100,000 cycles per sector.
+The W25Q64 SPI flash stores sensor records in sectors 1–2046. Sector 0 is reserved for metadata (current write index and total record count); sector 2047 is reserved for Wi-Fi credentials. Flash memory has a limited erase endurance of approximately 100,000 cycles per sector.
 
 ### The Problem
 

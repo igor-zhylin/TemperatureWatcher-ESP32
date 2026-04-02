@@ -236,30 +236,33 @@ void handleRoot() {
   // Page is static HTML — browser can cache it; values come from /api via JS
   server.sendHeader("Cache-Control", "max-age=3600");
   server.send_P(200, "text/html", R"rawliteral(<!DOCTYPE html>
-        <html lang="en"><head>
-        <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>BMP180 Station</title>
-        <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;
-        display:flex;justify-content:center;align-items:center;min-height:100vh}
-        .card{background:#16213e;border-radius:16px;padding:32px 40px;
-        box-shadow:0 8px 32px rgba(0,0,0,.4);min-width:320px}
-        h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
-        .row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #2a2a4a}
-        .row:last-child{border-bottom:none}
-        .label{color:#888}.value{font-weight:bold;color:#e94560}
-        .footer{text-align:center;margin-top:16px;font-size:.8em;color:#555}
-        a{color:#e94560}
-        </style></head><body>
-        <div class="card">
-        <h1>BMP180 Weather Station</h1>
-        <div class="row"><span class="label">Temperature</span><span class="value" id="t">…</span></div>
-        <div class="row"><span class="label">Pressure</span><span class="value" id="p1">…</span></div>
-        <div class="row"><span class="label">Pressure</span><span class="value" id="p2">…</span></div>
-        <div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
-        <div class="footer"><span id="ts"></span> | <a href="/api/stats">History</a> | <a href="/wifi-setup">WiFi</a></div>
-        </div>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BMP180 Station</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh;display:flex;flex-direction:column}
+nav{background:#16213e;border-bottom:1px solid #2a2a4a;display:flex;padding:0 20px;flex-shrink:0}
+nav a{color:#888;text-decoration:none;font-size:.9em;padding:14px 16px;border-bottom:2px solid transparent;display:inline-block}
+nav a:hover{color:#eee}
+nav a.on{color:#e94560;border-bottom-color:#e94560}
+main{flex:1;display:flex;justify-content:center;align-items:center;padding:24px}
+.card{background:#16213e;border-radius:16px;padding:32px 40px;box-shadow:0 8px 32px rgba(0,0,0,.4);min-width:320px}
+h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
+.row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #2a2a4a}
+.row:last-child{border-bottom:none}
+.label{color:#888}.value{font-weight:bold;color:#e94560}
+.footer{text-align:center;margin-top:16px;font-size:.8em;color:#555}
+</style></head><body>
+<nav><a class="on" href="/">Live</a><a href="/api/stats">History</a><a href="/wifi-setup">WiFi</a></nav>
+<main><div class="card">
+<h1>BMP180 Weather Station</h1>
+<div class="row"><span class="label">Temperature</span><span class="value" id="t">…</span></div>
+<div class="row"><span class="label">Pressure</span><span class="value" id="p1">…</span></div>
+<div class="row"><span class="label">Pressure</span><span class="value" id="p2">…</span></div>
+<div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
+<div class="footer"><span id="ts"></span></div>
+</div></main>
         <script>
         function upd(){
           fetch('/api/data').then(r=>r.json()).then(d=>{
@@ -339,7 +342,12 @@ void handleStats() {
      "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
      "<title>History</title><style>"
      "*{margin:0;padding:0;box-sizing:border-box}"
-     "body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;padding:24px}"
+     "body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh;display:flex;flex-direction:column}"
+     "nav{background:#16213e;border-bottom:1px solid #2a2a4a;display:flex;padding:0 20px;flex-shrink:0}"
+     "nav a{color:#888;text-decoration:none;font-size:.9em;padding:14px 16px;border-bottom:2px solid transparent;display:inline-block}"
+     "nav a:hover{color:#eee}"
+     "nav a.on{color:#e94560;border-bottom-color:#e94560}"
+     "main{flex:1;padding:24px}"
      ".card{background:#16213e;border-radius:16px;padding:24px;margin:0 auto;max-width:680px}"
      "h1{color:#e94560;margin-bottom:4px;font-size:1.3em}"
      ".sub{color:#555;font-size:.85em;margin-bottom:16px}"
@@ -352,13 +360,15 @@ void handleStats() {
      ".btn{display:inline-block;margin-top:16px;padding:8px 18px;background:#e94560;"
      "color:#fff;border-radius:8px;cursor:pointer;font-size:.9em;text-decoration:none}"
      ".btn:hover{background:#c73652}"
-     "</style></head><body><div class='card'>");
+     "</style></head><body>"
+     "<nav><a href='/'>Live</a><a class='on' href='/api/stats'>History</a><a href='/wifi-setup'>WiFi</a></nav>"
+     "<main><div class='card'>");
   flush();  // send CSS before building dynamic content
 
   char buf[160];
   snprintf(buf, sizeof(buf),
     "<h1>Temperature History</h1>"
-    "<div class='sub'>Stored: %u | Showing: %u | <a href='/'>Live</a></div>",
+    "<div class='sub'>Stored: %u | Showing: %u records</div>",
     totalWritten, n);
   ap(buf);
 
@@ -431,7 +441,7 @@ void handleStats() {
   ap("</table><div style='text-align:center'>"
      "<a class='btn' href='/api/export'>Download CSV</a>&nbsp;&nbsp;"
      "<a class='btn' href='/api/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
-     "Reset Flash</a></div></div></body></html>");
+     "Reset Flash</a></div></div></main></body></html>");
   flush();
   client.stop();
 }
@@ -534,8 +544,12 @@ void handleProvision() {
 <title>TempWatcher Setup</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;
-display:flex;justify-content:center;align-items:center;min-height:100vh}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh;display:flex;flex-direction:column}
+nav{background:#16213e;border-bottom:1px solid #2a2a4a;display:flex;padding:0 20px;flex-shrink:0}
+nav a{color:#888;text-decoration:none;font-size:.9em;padding:14px 16px;border-bottom:2px solid transparent;display:inline-block}
+nav a:hover{color:#eee}
+nav a.on{color:#e94560;border-bottom-color:#e94560}
+main{flex:1;display:flex;justify-content:center;align-items:center;padding:24px}
 .card{background:#16213e;border-radius:16px;padding:32px 40px;
 box-shadow:0 8px 32px rgba(0,0,0,.4);min-width:320px;width:100%;max-width:420px}
 h1{text-align:center;margin-bottom:8px;font-size:1.3em;color:#e94560}
@@ -561,7 +575,8 @@ button:hover{background:#c73652}
 border-radius:8px;color:#aaa;font-size:.85em;cursor:pointer}
 #scan-btn:hover{background:#3a3a5a}
 </style></head><body>
-<div class="card">
+<nav><a href="/">Live</a><a href="/api/stats">History</a><a class="on" href="/wifi-setup">WiFi</a></nav>
+<main><div class="card">
 <h1>WiFi Setup</h1>
 <div class="sub">Connect TempWatcher to your network</div>
 <div id="networks"><div class="net" style="color:#555;cursor:default">Scanning...</div></div>
@@ -601,7 +616,7 @@ function save(){
 }
 scan();
 </script>
-</body></html>)rawliteral");
+</div></main></body></html>)rawliteral");
 }
 
 void handleScan() {
