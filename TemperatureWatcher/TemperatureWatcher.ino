@@ -7,8 +7,7 @@
 #include <SPI.h>
 #include <SPIMemory.h>
 
-// ===== Wi-Fi credentials (defined in secrets.h, not tracked by git) =====
-#include "secrets.h"
+// Wi-Fi credentials — loaded from flash at runtime; configured via captive portal AP
 char ssid[33]     = {};
 char password[65] = {};
 
@@ -276,7 +275,9 @@ void handleRoot() {
         </body></html>)rawliteral");
 }
 
-// Statistics page — chunked response, single stack array, zero String heap for rows
+// Statistics page — direct WiFiClient write with 2 KB coalescing buffer.
+// Previously used ~100 tiny sendContent() calls (one per Bezier segment + one per table row),
+// each becoming a separate HTTP chunk and TCP write. Now batched into ~6 large writes.
 void handleStats() {
   if (!flashOK) { server.send(503, "text/plain", "Flash not available"); return; }
 
@@ -292,7 +293,7 @@ void handleStats() {
     return;
   }
 
-  // Single 800-byte array: bulk read then reverse in place (oldest→newest becomes newest→oldest)
+  // Bulk flash read + reverse in place (oldest→newest → newest→oldest)
   Record recs[50];
   uint32_t startIdx = (writeIdx - n + MAX_RECORDS) % MAX_RECORDS;
   digitalWrite(WRITE_LED, HIGH);
@@ -304,54 +305,70 @@ void handleStats() {
     flash.readByteArray(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
   }
   digitalWrite(WRITE_LED, LOW);
-  // n >= 1 here so j = n-1 is safe (no uint32_t underflow)
   for (uint32_t i = 0, j = n - 1; i < j; i++, j--) { Record t = recs[i]; recs[i] = recs[j]; recs[j] = t; }
   // recs[0]=newest, recs[n-1]=oldest
 
-  // Temperature range for SVG
   float tmin = recs[0].temp, tmax = recs[0].temp;
   for (uint32_t i = 1; i < n; i++) {
     if (recs[i].temp < tmin) tmin = recs[i].temp;
     if (recs[i].temp > tmax) tmax = recs[i].temp;
   }
 
-  // Chunked response: browser receives data immediately, no giant String in RAM
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
+  // Direct client write — no chunked encoding overhead
+  WiFiClient client = server.client();
+  client.print(F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"));
 
-  server.sendContent_P(PSTR("<!DOCTYPE html><html lang='en'><head>"
-    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>History</title><style>"
-    "*{margin:0;padding:0;box-sizing:border-box}"
-    "body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;padding:24px}"
-    ".card{background:#16213e;border-radius:16px;padding:24px;margin:0 auto;max-width:680px}"
-    "h1{color:#e94560;margin-bottom:4px;font-size:1.3em}"
-    ".sub{color:#555;font-size:.85em;margin-bottom:16px}"
-    "svg{width:100%;height:80px;display:block;margin-bottom:20px}"
-    "table{width:100%;border-collapse:collapse;font-size:.9em}"
-    "th{color:#888;font-weight:normal;text-align:left;padding:6px 8px;border-bottom:1px solid #2a2a4a}"
-    "td{padding:6px 8px;border-bottom:1px solid #16213e}"
-    "tr:last-child td{border:none}"
-    ".v{color:#e94560;font-weight:bold}a{color:#e94560}"
-    ".btn{display:inline-block;margin-top:16px;padding:8px 18px;background:#e94560;"
-    "color:#fff;border-radius:8px;cursor:pointer;font-size:.9em;text-decoration:none}"
-    ".btn:hover{background:#c73652}"
-    "</style></head><body><div class='card'>"));
+  // 2 KB coalescing buffer: accumulate small strings, flush in large TCP writes
+  char     outbuf[2048];
+  uint16_t outlen = 0;
 
-  char buf[128];
+  auto flush = [&]() {
+    if (outlen > 0) { client.write((const uint8_t*)outbuf, outlen); outlen = 0; yield(); }
+  };
+  // Append string to buffer; if string exceeds buffer size send it directly
+  auto ap = [&](const char* s) {
+    uint16_t l = (uint16_t)strlen(s);
+    if (l >= sizeof(outbuf)) { flush(); client.write((const uint8_t*)s, l); yield(); return; }
+    if (outlen + l >= sizeof(outbuf)) flush();
+    memcpy(outbuf + outlen, s, l);
+    outlen += l;
+  };
+
+  // ── Head + CSS (one large write) ────────────────────────────────────────────
+  ap("<!DOCTYPE html><html lang='en'><head>"
+     "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+     "<title>History</title><style>"
+     "*{margin:0;padding:0;box-sizing:border-box}"
+     "body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#eee;padding:24px}"
+     ".card{background:#16213e;border-radius:16px;padding:24px;margin:0 auto;max-width:680px}"
+     "h1{color:#e94560;margin-bottom:4px;font-size:1.3em}"
+     ".sub{color:#555;font-size:.85em;margin-bottom:16px}"
+     "svg{width:100%;height:90px;display:block;margin-bottom:20px}"
+     "table{width:100%;border-collapse:collapse;font-size:.9em}"
+     "th{color:#888;font-weight:normal;text-align:left;padding:6px 8px;border-bottom:1px solid #2a2a4a}"
+     "td{padding:6px 8px;border-bottom:1px solid #16213e}"
+     "tr:last-child td{border:none}"
+     ".v{color:#e94560;font-weight:bold}a{color:#e94560}"
+     ".btn{display:inline-block;margin-top:16px;padding:8px 18px;background:#e94560;"
+     "color:#fff;border-radius:8px;cursor:pointer;font-size:.9em;text-decoration:none}"
+     ".btn:hover{background:#c73652}"
+     "</style></head><body><div class='card'>");
+  flush();  // send CSS before building dynamic content
+
+  char buf[160];
   snprintf(buf, sizeof(buf),
     "<h1>Temperature History</h1>"
     "<div class='sub'>Stored: %u | Showing: %u | <a href='/'>Live</a></div>",
     totalWritten, n);
-  server.sendContent(buf);
+  ap(buf);
 
-  // SVG chart — static parts via sendContent_P, only dynamic values through buf
-  server.sendContent_P(PSTR("<svg viewBox='0 0 500 90' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"));
-  snprintf(buf, sizeof(buf), "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>", tmax);
-  server.sendContent(buf);
-  // Smooth curve via Catmull-Rom → cubic Bezier.
-  // recs[0]=newest, recs[n-1]=oldest; step k=0 → recs[n-1] (left/oldest).
-  server.sendContent_P(PSTR("<path d='"));
+  // ── SVG chart ───────────────────────────────────────────────────────────────
+  snprintf(buf, sizeof(buf),
+    "<svg viewBox='0 0 500 90' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"
+    "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text><path d='", tmax);
+  ap(buf);
+
+  // Smooth curve via Catmull-Rom → cubic Bezier (recs[n-1]=oldest=left, recs[0]=newest=right)
   {
     float alpha = (n > 1) ? 490.0f / (float)(n - 1) : 0.0f;
     auto ptX = [&](int k) -> float { return (n < 2) ? 250.0f : k * alpha + 5.0f; };
@@ -360,24 +377,26 @@ void handleStats() {
       return (tmax == tmin) ? 40.0f : 5.0f + (tmax - recs[idx].temp) / (tmax - tmin) * 65.0f;
     };
     snprintf(buf, sizeof(buf), "M%d,%.1f", (n < 2 ? 250 : 5), ptY(0));
-    server.sendContent(buf);
+    ap(buf);
     for (int k = 0; k < (int)n - 1; k++) {
-      int km1 = (k > 0)            ? k - 1 : 0;
-      int k2  = (k + 2 < (int)n)  ? k + 2 : n - 1;
+      int km1 = (k > 0)           ? k - 1 : 0;
+      int k2  = (k + 2 < (int)n) ? k + 2 : n - 1;
       float cp1x = ptX(k)   + (ptX(k+1) - ptX(km1)) / 6.0f;
       float cp1y = ptY(k)   + (ptY(k+1) - ptY(km1)) / 6.0f;
       float cp2x = ptX(k+1) - (ptX(k2)  - ptX(k))   / 6.0f;
       float cp2y = ptY(k+1) - (ptY(k2)  - ptY(k))   / 6.0f;
       snprintf(buf, sizeof(buf), " C%.1f,%.1f %.1f,%.1f %.1f,%.1f",
                cp1x, cp1y, cp2x, cp2y, ptX(k+1), ptY(k+1));
-      server.sendContent(buf);
+      ap(buf);
     }
   }
-  server.sendContent_P(PSTR("' fill='none' stroke='#e94560' stroke-width='2'/>"));
-  snprintf(buf, sizeof(buf), "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>", tmin);
-  server.sendContent(buf);
-  // Time axis — thin separator line + oldest (left) and newest (right) timestamps
-  server.sendContent_P(PSTR("<line x1='5' y1='76' x2='495' y2='76' stroke='#2a2a4a' stroke-width='1'/>"));
+  snprintf(buf, sizeof(buf),
+    "' fill='none' stroke='#e94560' stroke-width='2'/>"
+    "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>"
+    "<line x1='5' y1='76' x2='495' y2='76' stroke='#2a2a4a' stroke-width='1'/>", tmin);
+  ap(buf);
+
+  // Time axis labels
   {
     char tleft[14] = "-", tright[14] = "-";
     if (recs[n - 1].timestamp > 0) {
@@ -388,36 +407,34 @@ void handleStats() {
       time_t t = recs[0].timestamp; struct tm ti; localtime_r(&t, &ti);
       strftime(tright, sizeof(tright), "%d.%m %H:%M", &ti);
     }
-    snprintf(buf, sizeof(buf), "<text x='5' y='87' font-size='9' fill='#666'>%s</text>", tleft);
-    server.sendContent(buf);
-    snprintf(buf, sizeof(buf), "<text x='495' y='87' font-size='9' fill='#666' text-anchor='end'>%s</text>", tright);
-    server.sendContent(buf);
+    snprintf(buf, sizeof(buf),
+      "<text x='5' y='87' font-size='9' fill='#666'>%s</text>"
+      "<text x='495' y='87' font-size='9' fill='#666' text-anchor='end'>%s</text></svg>",
+      tleft, tright);
+    ap(buf);
   }
-  server.sendContent_P(PSTR("</svg>"));
+  flush();  // flush SVG before table
 
-  // Table — each row built in a fixed 128-byte buffer, never allocates on heap
-  server.sendContent_P(PSTR("<table><tr><th>#</th><th>Time</th><th>Temp</th><th>Pressure</th><th>Alt</th></tr>"));
+  // ── Table ───────────────────────────────────────────────────────────────────
+  ap("<table><tr><th>#</th><th>Time</th><th>Temp</th><th>Pressure</th><th>Alt</th></tr>");
   for (uint32_t i = 0; i < n; i++) {
     char tbuf[20] = "-";
     if (recs[i].timestamp > 0) {
-      time_t t = recs[i].timestamp;
-      struct tm ti;
-      localtime_r(&t, &ti);
+      time_t t = recs[i].timestamp; struct tm ti; localtime_r(&t, &ti);
       strftime(tbuf, sizeof(tbuf), "%d.%m.%Y %H:%M", &ti);
     }
-    char row[160];
-    snprintf(row, sizeof(row),
+    snprintf(buf, sizeof(buf),
       "<tr><td>%u</td><td>%s</td><td class='v'>%.1f&deg;C</td><td>%.1f hPa / %.1f mmHg</td><td>%.1f m</td></tr>",
       totalWritten - i, tbuf, recs[i].temp, recs[i].pressureHPa, recs[i].pressureHPa / 1.33322f, recs[i].altitude);
-    server.sendContent(row);
+    ap(buf);
   }
 
-  server.sendContent_P(PSTR("</table><div style='text-align:center'>"
-    "<a class='btn' href='/export'>Download CSV</a>&nbsp;&nbsp;"
-    "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
-    "Reset Flash</a></div></div></body></html>"));
-  server.sendContent("");  // terminate chunked transfer encoding
-  server.client().stop();
+  ap("</table><div style='text-align:center'>"
+     "<a class='btn' href='/export'>Download CSV</a>&nbsp;&nbsp;"
+     "<a class='btn' href='/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
+     "Reset Flash</a></div></div></body></html>");
+  flush();
+  client.stop();
 }
 
 // Reset flash counters — erases only the metadata sector (sector 0).
@@ -630,13 +647,11 @@ void setup() {
   // Initialize W25Q64 flash
   flashInit();
 
-  // Load WiFi credentials: start with compile-time defaults, override from flash if valid
-  strncpy(ssid,     WIFI_SSID,     32);  ssid[32]     = '\0';
-  strncpy(password, WIFI_PASSWORD, 64);  password[64] = '\0';
+  // Load WiFi credentials from flash — if none saved yet, AP mode will start below
   if (flashOK && readCredsFromFlash()) {
     Serial.printf("Loaded credentials from flash: SSID=%s\n", ssid);
   } else {
-    Serial.printf("Using compile-time credentials: SSID=%s\n", ssid);
+    Serial.println("No credentials in flash — will start captive portal AP");
   }
 
   // Initialize LCDs
@@ -673,17 +688,22 @@ void setup() {
   // ===== Connect to Wi-Fi =====
   lcd.setCursor(0, 2);
   lcd.print("[2/2] WiFi...");
-  Serial.printf("Connecting to: %s\n", ssid);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(500);
-  WiFi.begin(ssid, password);
 
   int attempts = 0;
   int lastStatus = -1;
 
-  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+  if (ssid[0] != '\0') {
+    // Credentials available — attempt connection
+    Serial.printf("Connecting to: %s\n", ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(500);
+    WiFi.begin(ssid, password);
+  } else {
+    Serial.println("No SSID — skipping connect, going to AP mode");
+  }
+
+  while (ssid[0] != '\0' && WiFi.status() != WL_CONNECTED && attempts < 15) {
     delay(1000);
     attempts++;
 
@@ -718,8 +738,9 @@ void setup() {
     apMode = true;
 
     WiFi.mode(WIFI_AP_STA);
+    IPAddress apIP(192, 168, 0, 1);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP("TempWatcher");
-    IPAddress apIP = WiFi.softAPIP();
 
     dnsServer.start(53, "*", apIP);
 
