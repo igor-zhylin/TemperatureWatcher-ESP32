@@ -233,8 +233,7 @@ const char* wifiStatusToString(int status) {
 
 // Serve the main page — values updated via fetch('/api/data'), no full reload
 void handleRoot() {
-  // Page is static HTML — browser can cache it; values come from /api via JS
-  server.sendHeader("Cache-Control", "max-age=3600");
+  server.sendHeader("Cache-Control", "no-cache");
   server.send_P(200, "text/html", R"rawliteral(<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -254,7 +253,11 @@ h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
 .label{color:#888}.value{font-weight:bold;color:#e94560}
 .footer{text-align:center;margin-top:16px;font-size:.8em;color:#555}
 </style></head><body>
-<nav><a class="on" href="/">Live</a><a href="/api/stats">History</a><a href="/wifi-setup">WiFi</a></nav>
+<nav>
+  <a class="on" href="/">Live</a>
+  <a href="/api/stats">History</a>
+  <a href="/wifi-setup">WiFi</a>
+</nav>
 <main><div class="card">
 <h1>BMP180 Weather Station</h1>
 <div class="row"><span class="label">Temperature</span><span class="value" id="t">…</span></div>
@@ -263,19 +266,19 @@ h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
 <div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
 <div class="footer"><span id="ts"></span></div>
 </div></main>
-        <script>
-        function upd(){
-          fetch('/api/data').then(r=>r.json()).then(d=>{
-            document.getElementById('t').textContent=d.temperature_c+' \u00b0C';
-            document.getElementById('p1').textContent=d.pressure_hpa+' hPa';
-            document.getElementById('p2').textContent=d.pressure_mmhg+' mmHg';
-            document.getElementById('al').textContent=d.altitude_m+' m';
-            document.getElementById('ts').textContent=new Date().toLocaleTimeString();
-          });
-        }
-        upd();setInterval(upd,5000);
-        </script>
-        </body></html>)rawliteral");
+<script>
+function upd(){
+  fetch('/api/data').then(r=>r.json()).then(d=>{
+    document.getElementById('t').textContent=d.temperature_c+' \u00b0C';
+    document.getElementById('p1').textContent=d.pressure_hpa+' hPa';
+    document.getElementById('p2').textContent=d.pressure_mmhg+' mmHg';
+    document.getElementById('al').textContent=d.altitude_m+' m';
+    document.getElementById('ts').textContent=new Date().toLocaleTimeString();
+  });
+}
+upd();setInterval(upd,5000);
+</script>
+</body></html>)rawliteral");
 }
 
 // Statistics page — direct WiFiClient write with 2 KB coalescing buffer.
