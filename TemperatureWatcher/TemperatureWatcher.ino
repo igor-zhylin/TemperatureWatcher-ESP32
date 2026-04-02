@@ -308,7 +308,7 @@ void handleStats() {
   server.sendContent(buf);
 
   // SVG chart — static parts via sendContent_P, only dynamic values through buf
-  server.sendContent_P(PSTR("<svg viewBox='0 0 500 75' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"));
+  server.sendContent_P(PSTR("<svg viewBox='0 0 500 90' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"));
   snprintf(buf, sizeof(buf), "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text>", tmax);
   server.sendContent(buf);
   // Smooth curve via Catmull-Rom → cubic Bezier.
@@ -338,6 +338,23 @@ void handleStats() {
   server.sendContent_P(PSTR("' fill='none' stroke='#e94560' stroke-width='2'/>"));
   snprintf(buf, sizeof(buf), "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>", tmin);
   server.sendContent(buf);
+  // Time axis — thin separator line + oldest (left) and newest (right) timestamps
+  server.sendContent_P(PSTR("<line x1='5' y1='76' x2='495' y2='76' stroke='#2a2a4a' stroke-width='1'/>"));
+  {
+    char tleft[14] = "-", tright[14] = "-";
+    if (recs[n - 1].timestamp > 0) {
+      time_t t = recs[n - 1].timestamp; struct tm ti; localtime_r(&t, &ti);
+      strftime(tleft,  sizeof(tleft),  "%d.%m %H:%M", &ti);
+    }
+    if (recs[0].timestamp > 0) {
+      time_t t = recs[0].timestamp; struct tm ti; localtime_r(&t, &ti);
+      strftime(tright, sizeof(tright), "%d.%m %H:%M", &ti);
+    }
+    snprintf(buf, sizeof(buf), "<text x='5' y='87' font-size='9' fill='#666'>%s</text>", tleft);
+    server.sendContent(buf);
+    snprintf(buf, sizeof(buf), "<text x='495' y='87' font-size='9' fill='#666' text-anchor='end'>%s</text>", tright);
+    server.sendContent(buf);
+  }
   server.sendContent_P(PSTR("</svg>"));
 
   // Table — each row built in a fixed 128-byte buffer, never allocates on heap
