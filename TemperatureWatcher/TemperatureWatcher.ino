@@ -363,9 +363,8 @@ void handleStats() {
   ap(buf);
 
   // ── SVG chart ───────────────────────────────────────────────────────────────
-  snprintf(buf, sizeof(buf),
-    "<svg viewBox='0 0 500 90' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>"
-    "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text><path d='", tmax);
+  ap("<svg viewBox='0 0 500 90' preserveAspectRatio='none' style='background:#0f0f1e;border-radius:8px'>");
+  snprintf(buf, sizeof(buf), "<text x='4' y='13' font-size='10' fill='#555'>%.1f C</text><path d='", tmax);
   ap(buf);
 
   // Smooth curve via Catmull-Rom → cubic Bezier (recs[n-1]=oldest=left, recs[0]=newest=right)
