@@ -35,8 +35,7 @@ bool wifiWasLost = false;
 
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(RESET_BTN, INPUT_PULLUP);
+  pinMode(LED_PIN,   OUTPUT);
   pinMode(WRITE_LED, OUTPUT);
   digitalWrite(WRITE_LED, LOW);
 
@@ -222,41 +221,6 @@ void loop() {
     snprintf(buf, sizeof(buf), "%8.1f m  ", altitude);
     lcd.setCursor(5, 3);
     lcd.print(buf);
-  }
-
-  // Physical reset button — hold 2 s to confirm
-  if (digitalRead(RESET_BTN) == LOW) {
-    delay(50);
-    if (digitalRead(RESET_BTN) == LOW) {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Hold 2s to reset");
-      lcd.setCursor(0, 1);
-      lcd.print("flash...");
-      uint32_t holdStart = millis();
-      while (digitalRead(RESET_BTN) == LOW) {
-        delay(10);
-        if (millis() - holdStart >= 2000) {
-          lcd.clear();
-          lcd.setCursor(0, 0);
-          lcd.print("Resetting flash...");
-          Serial.println("Physical button: flash reset");
-          digitalWrite(WRITE_LED, HIGH);
-          flash.eraseSector(0);
-          writeIdx = 0;
-          totalWritten = 0;
-          metaSlot = 0;
-          flashWriteMeta();
-          digitalWrite(WRITE_LED, LOW);
-          lcd.setCursor(0, 1);
-          lcd.print("Done!");
-          delay(1500);
-          lcd.clear();
-          break;
-        }
-      }
-      if (digitalRead(RESET_BTN) == HIGH && millis() - holdStart < 2000) lcd.clear();
-    }
   }
 
   // Save to flash every SAVE_INTERVAL

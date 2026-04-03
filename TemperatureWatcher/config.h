@@ -1,9 +1,8 @@
 #pragma once
 
 // ===== Pin assignments =====
-#define LED_PIN 2     // Built-in LED (GPIO 2)
-#define RESET_BTN 4   // Flash reset button: GPIO4 → button → GND
-#define WRITE_LED 13  // Red LED: GPIO13 → 220Ω → LED → GND
+#define LED_PIN     2    // Built-in LED (GPIO 2)
+#define WRITE_LED   13   // Red LED: GPIO13 → 220Ω → LED → GND
 
 // ===== W25Q64 SPI Flash =====
 // Wiring: MOSI=23, MISO=19, SCK=18, CS=5 (default ESP32 VSPI)
