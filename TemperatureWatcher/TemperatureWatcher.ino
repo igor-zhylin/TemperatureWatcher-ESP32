@@ -137,6 +137,7 @@ void setup() {
 
     // Register web routes
     server.on("/",               handleRoot);
+    server.on("/api",            handleRoot);
     server.on("/api/data",       handleApi);
     server.on("/api/stats",      handleStats);
     server.on("/api/export",     handleExport);
