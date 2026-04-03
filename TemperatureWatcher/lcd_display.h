@@ -11,17 +11,17 @@ LiquidCrystal_I2C lcd2(0x26, 16, 2);
 // ===== LCD2 scroll state =====
 // Only the value portion scrolls; prefix labels ("WiFi: ", "IP: ") are drawn once.
 char lcd2SsidVal[33] = {};  // SSID, up to 32 chars
-char lcd2IpVal[16]   = {};  // IP address, up to 15 chars
+char lcd2IpVal[16] = {};    // IP address, up to 15 chars
 
 struct ScrollTrack {
-  int      pos     = 0;
-  int      dir     = 1;
+  int pos = 0;
+  int dir = 1;
   uint32_t pauseMs = 0;  // non-zero while paused at an end
 };
 
 ScrollTrack lcd2SsidScroll;
 ScrollTrack lcd2IpScroll;
-uint32_t    lcd2ScrollMs = 0;
+uint32_t lcd2ScrollMs = 0;
 
 // ===== Functions =====
 
@@ -41,8 +41,16 @@ void lcd2ScrollTick(ScrollTrack& t, const char* val, uint8_t col, uint8_t row, i
   int maxPos = len - winSize;
   if (t.pauseMs == 0) {
     t.pos += t.dir;
-    if (t.pos >= maxPos) { t.pos = maxPos; t.dir = -1; t.pauseMs = millis(); }
-    if (t.pos <= 0)      { t.pos = 0;      t.dir =  1; t.pauseMs = millis(); }
+    if (t.pos >= maxPos) {
+      t.pos = maxPos;
+      t.dir = -1;
+      t.pauseMs = millis();
+    }
+    if (t.pos <= 0) {
+      t.pos = 0;
+      t.dir = 1;
+      t.pauseMs = millis();
+    }
   } else if (millis() - t.pauseMs >= 500) {
     t.pauseMs = 0;
   }
@@ -51,8 +59,12 @@ void lcd2ScrollTick(ScrollTrack& t, const char* val, uint8_t col, uint8_t row, i
 // Draw static row labels once — never redrawn to avoid flicker.
 void lcdDrawLabels() {
   lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("Temp:");
-  lcd.setCursor(0, 1); lcd.print("hPa:");
-  lcd.setCursor(0, 2); lcd.print("mmHg:");
-  lcd.setCursor(0, 3); lcd.print("Alt:");
+  lcd.setCursor(0, 0);
+  lcd.print("Temp:");
+  lcd.setCursor(0, 1);
+  lcd.print("hPa:");
+  lcd.setCursor(0, 2);
+  lcd.print("mmHg:");
+  lcd.setCursor(0, 3);
+  lcd.print("Alt:");
 }
