@@ -4,6 +4,20 @@ ESP32-based weather station that reads temperature, atmospheric pressure, and al
 
 ---
 
+## Project Structure
+
+| File | Purpose |
+|---|---|
+| `TemperatureWatcher.ino` | Entry point — `setup()`, `loop()`, global state |
+| `config.h` | Pin assignments and flash/timing constants |
+| `flash.h` | W25Q64 flash structs, state, and all read/write functions |
+| `lcd_display.h` | LCD objects, scroll state, and display helper functions |
+| `web_handlers.h` | `WebServer` instance and all HTTP route handlers |
+| `html_pages.h` | Static HTML for the live-data page and WiFi setup page (PROGMEM) |
+| `html_stats.h` | Static head/CSS and footer for the history page |
+
+---
+
 ## Features
 
 - **BMP180 sensor** — temperature (°C), pressure (hPa / mmHg), altitude (m)
@@ -49,7 +63,7 @@ On first boot (or whenever saved credentials are missing or fail 15 times):
 4. Select your network, enter the password, press **Save & Connect**
 5. Credentials are written to flash — the device restarts and connects automatically from then on
 
-To reconfigure, visit **`/wifi-setup`** from the main web interface at any time.
+To reconfigure, visit **`/api/wifi-setup`** from the main web interface at any time.
 
 ### 2. Arduino IDE libraries
 
@@ -80,7 +94,7 @@ Open the IP address shown on lcd2 in a browser. All pages share a navigation bar
 | `/api/export` | Download all records as `data.csv` |
 | `/api/reset-flash` | Erase flash history (confirmation dialog) |
 | `/api/data` | JSON endpoint: `{"temperature_c":…,"pressure_hpa":…,"pressure_mmhg":…,"altitude_m":…}` |
-| `/wifi-setup` | Wi-Fi provisioning page — scan networks, pick one, save credentials |
+| `/api/wifi-setup` | Wi-Fi provisioning page — scan networks, pick one, save credentials |
 
 ---
 

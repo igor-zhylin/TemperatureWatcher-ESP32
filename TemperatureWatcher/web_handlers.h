@@ -243,7 +243,7 @@ void handleExport() {
   client.stop();
 }
 
-// WiFi setup page — shown in AP captive-portal mode and via /wifi-setup in normal mode.
+// WiFi setup page — shown in AP captive-portal mode and via /api/wifi-setup in normal mode.
 void handleProvision() {
   server.sendHeader("Cache-Control", "no-cache");
   server.send_P(200, "text/html", HTML_PROVISION);

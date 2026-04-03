@@ -27,7 +27,7 @@ static const char HTML_STATS_HEAD[] =
   "color:#fff;border-radius:8px;cursor:pointer;font-size:.9em;text-decoration:none}"
   ".btn:hover{background:#c73652}"
   "</style></head><body>"
-  "<nav><a href='/'>Live</a><a class='on' href='/api/stats'>History</a><a href='/wifi-setup'>WiFi</a></nav>"
+  "<nav><a href='/'>Live</a><a class='on' href='/api/stats'>History</a><a href='/api/wifi-setup'>WiFi</a></nav>"
   "<main><div class='card'>";
 
 // Static footer block for the /api/stats history page.
