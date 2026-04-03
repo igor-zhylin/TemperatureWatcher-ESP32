@@ -137,11 +137,12 @@ void handleStats() {
       ap(buf);
     }
   }
+  // Split into two calls: combined string is ~183 bytes, buf is only 160
   snprintf(buf, sizeof(buf),
     "' fill='none' stroke='#e94560' stroke-width='2'/>"
-    "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>"
-    "<line x1='5' y1='76' x2='495' y2='76' stroke='#2a2a4a' stroke-width='1'/>", tmin);
+    "<text x='4' y='72' font-size='10' fill='#555'>%.1f C</text>", tmin);
   ap(buf);
+  ap("<line x1='5' y1='76' x2='495' y2='76' stroke='#2a2a4a' stroke-width='1'/>");
   {
     char tleft[14] = "-", tright[14] = "-";
     if (recs[n - 1].timestamp > 0) {
