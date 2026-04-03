@@ -25,7 +25,7 @@ h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
 <nav>
   <a class="on" href="/">Live</a>
   <a href="/api/stats">History</a>
-  <a href="/wifi-setup">WiFi</a>
+  <a href="/api/wifi-setup">WiFi</a>
 </nav>
 <main><div class="card">
 <h1>BMP180 Weather Station</h1>
@@ -50,7 +50,7 @@ upd();setInterval(upd,5000);
 </body></html>)rawliteral";
 
 // ===== WiFi provisioning / setup page =====
-// Shown both in AP captive-portal mode and via /wifi-setup in normal mode.
+// Shown both in AP captive-portal mode and via /api/wifi-setup in normal mode.
 static const char HTML_PROVISION[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -88,7 +88,7 @@ button:hover{background:#c73652}
 border-radius:8px;color:#aaa;font-size:.85em;cursor:pointer}
 #scan-btn:hover{background:#3a3a5a}
 </style></head><body>
-<nav><a href="/">Live</a><a href="/api/stats">History</a><a class="on" href="/wifi-setup">WiFi</a></nav>
+<nav><a href="/">Live</a><a href="/api/stats">History</a><a class="on" href="/api/wifi-setup">WiFi</a></nav>
 <main><div class="card">
 <h1>WiFi Setup</h1>
 <div class="sub">Connect TempWatcher to your network</div>
@@ -104,7 +104,7 @@ border-radius:8px;color:#aaa;font-size:.85em;cursor:pointer}
 <script>
 function scan(){
   document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scanning...</div>';
-  fetch('/scan').then(r=>r.json()).then(nets=>{
+  fetch('/api/scan').then(r=>r.json()).then(nets=>{
     if(!nets.length){document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">No networks found</div>';return;}
     document.getElementById('networks').innerHTML=nets.map(n=>{
       var lock=n.enc?'<span class="lock">&#128274;</span>':'';
@@ -122,7 +122,7 @@ function save(){
   if(!s){document.getElementById('status').textContent='Please enter an SSID.';return;}
   document.getElementById('status').textContent='Saving...';
   var fd=new FormData();fd.append('ssid',s);fd.append('password',p);
-  fetch('/save',{method:'POST',body:fd}).then(r=>{
+  fetch('/api/save',{method:'POST',body:fd}).then(r=>{
     if(r.ok){document.getElementById('status').textContent='Saved! Device is restarting...';}
     else{document.getElementById('status').textContent='Error saving credentials.';}
   }).catch(()=>{document.getElementById('status').textContent='Saved! Device is restarting...';});

@@ -107,8 +107,8 @@ void setup() {
     WiFi.softAP("TempWatcher");
     dnsServer.start(53, "*", apIP);
     server.on("/",     handleProvision);
-    server.on("/scan", handleScan);
-    server.on("/save", HTTP_POST, handleSave);
+    server.on("/api/scan", handleScan);
+    server.on("/api/save", HTTP_POST, handleSave);
     server.onNotFound(handleProvision);
     server.begin();
     Serial.printf("AP mode active, IP: %s\n", apIP.toString().c_str());
@@ -141,9 +141,9 @@ void setup() {
     server.on("/api/stats",      handleStats);
     server.on("/api/export",     handleExport);
     server.on("/api/reset-flash",handleFlashReset);
-    server.on("/wifi-setup",     handleProvision);
-    server.on("/scan",           handleScan);
-    server.on("/save", HTTP_POST,handleSave);
+    server.on("/api/wifi-setup",  handleProvision);
+    server.on("/api/scan",        handleScan);
+    server.on("/api/save", HTTP_POST, handleSave);
     server.begin();
     Serial.println("HTTP server started");
 
