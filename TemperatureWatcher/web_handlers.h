@@ -41,6 +41,7 @@ void handleRoot() {
 // JSON snapshot of current sensor readings — zero heap allocations.
 void handleApi() {
   server.sendHeader("Cache-Control", "no-cache");
+  server.sendHeader("Connection", "close");
   char json[128];
   snprintf(json, sizeof(json),
            "{\"temperature_c\":%.1f,\"pressure_hpa\":%.1f,\"pressure_mmhg\":%.1f,\"altitude_m\":%.1f}",
@@ -289,8 +290,17 @@ void handleProvision() {
 }
 
 // Scan for nearby networks, return JSON array sorted by RSSI.
+// Uses async scan so the main loop is not frozen for 2-5 s while the radio sweeps channels.
 void handleScan() {
-  int n = WiFi.scanNetworks();
+  WiFi.scanDelete();
+  WiFi.scanNetworks(/*async=*/true);
+  unsigned long start = millis();
+  while (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
+    if (millis() - start > 6000) break;
+    delay(50);  // yields to TCP/IP FreeRTOS task; keeps lwIP alive
+  }
+  int n = WiFi.scanComplete();
+  if (n < 0) n = 0;
   char json[4200];
   uint16_t len = 0;
   json[len++] = '[';
