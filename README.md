@@ -67,15 +67,39 @@ To reconfigure, visit **`/api/wifi-setup`** from the main web interface at any t
 
 ### 2. Arduino IDE libraries
 
+#### Board package
+
+Install via **Boards Manager** (Tools → Board → Boards Manager):
+
+| Package | Version |
+|---|---|
+| **esp32** by Espressif Systems | ≥ 2.x |
+
+Select board: **ESP32 Dev Module**
+
+#### Libraries
+
 Install via **Library Manager** (Sketch → Include Library → Manage Libraries):
 
-| Library | Version tested |
-|---|---|
-| Adafruit BMP085 Library | ≥ 1.2 |
-| LiquidCrystal I2C | ≥ 1.1.2 |
-| SPIMemory | ≥ 3.4 |
+| Library | Author | Version tested | Used for |
+|---|---|---|---|
+| **Adafruit BMP085 Library** | Adafruit | ≥ 1.2 | BMP180 sensor (temperature, pressure, altitude) |
+| **LiquidCrystal I2C** | Frank de Brabander | ≥ 1.1.2 | Both I2C LCD displays |
+| **SPIMemory** | Prajwal Bhattaram | ≥ 3.4 | W25Q64 SPI flash chip |
 
-Board: **ESP32 Dev Module** (esp32 by Espressif, ≥ 2.x)
+The following libraries come bundled with the esp32 board package — **no separate install needed**:
+
+| Library | Used for |
+|---|---|
+| WiFi | Wi-Fi STA/AP mode |
+| WebServer | HTTP server |
+| DNSServer | Captive portal in AP mode |
+| SPI | SPI bus (flash chip) |
+| Wire | I2C bus (LCDs, BMP180) |
+
+#### FreeRTOS
+
+FreeRTOS is built into the ESP32 Arduino core — no install needed. The firmware uses `xTaskCreatePinnedToCore` to run the web server on Core 0 while sensors, LCD, and flash writes run on Core 1.
 
 ### 3. Flash and run
 
@@ -181,4 +205,4 @@ A slot is considered empty when both its words read as `0xFFFFFFFF` (the erased 
 [ valid | valid | ... | valid | empty | empty | ... | empty ]
 ```
 
-This sorted structure allows a **binary search** to locate the first empty slot in **9 SPI reads** (log₂ 512) instead of up to 1,024 sequential reads. The slot immediately before the first empty one holds the current metadata.
+This sorted structure allows a **binary search** to locate the first empty slot in **9 SPI reads** (log₂ 512) instead of up to 1,024 sequential reads. The slot immediately before the first empty one holds the current metadata.

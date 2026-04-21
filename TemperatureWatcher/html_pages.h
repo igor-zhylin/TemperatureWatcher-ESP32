@@ -102,16 +102,20 @@ border-radius:8px;color:#aaa;font-size:.85em;cursor:pointer}
 <div id="status"></div>
 </div>
 <script>
-function scan(){
-  document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scanning...</div>';
+function renderNets(nets){
+  if(!nets.length){document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">No networks found</div>';return;}
+  document.getElementById('networks').innerHTML=nets.map(n=>{
+    var lock=n.enc?'<span class="lock">&#128274;</span>':'';
+    return '<div class="net" onclick="pick(\''+n.ssid.replace(/'/g,"\\'")+'\')">'
+      +'<span class="name">'+escH(n.ssid)+lock+'</span>'
+      +'<span class="meta">'+n.rssi+' dBm</span></div>';
+  }).join('');
+}
+function scan(retry){
+  if(!retry) document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scanning...</div>';
   fetch('/api/scan').then(r=>r.json()).then(nets=>{
-    if(!nets.length){document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">No networks found</div>';return;}
-    document.getElementById('networks').innerHTML=nets.map(n=>{
-      var lock=n.enc?'<span class="lock">&#128274;</span>':'';
-      return '<div class="net" onclick="pick(\''+n.ssid.replace(/'/g,"\\'")+'\')">'
-        +'<span class="name">'+escH(n.ssid)+lock+'</span>'
-        +'<span class="meta">'+n.rssi+' dBm</span></div>';
-    }).join('');
+    if(!nets.length&&!retry){setTimeout(()=>scan(true),2000);return;}
+    renderNets(nets);
   }).catch(()=>{document.getElementById('networks').innerHTML='<div class="net" style="color:#555;cursor:default">Scan failed</div>';});
 }
 function escH(s){var d=document.createElement('div');d.appendChild(document.createTextNode(s));return d.innerHTML;}
