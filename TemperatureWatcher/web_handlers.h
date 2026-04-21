@@ -11,3 +11,7 @@ void handleExport();
 void handleProvision();
 void handleScan();
 void handleSave();
+
+// Async WiFi scan management — called from taskWeb
+void startAsyncScan();
+void scanTick();

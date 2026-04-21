@@ -21,6 +21,7 @@ void handleApi() {
            "{\"temperature_c\":%.1f,\"pressure_hpa\":%.1f,\"pressure_mmhg\":%.1f,\"altitude_m\":%.1f}",
            (float)temp, (float)pressureHPa, (float)pressureMmHg, (float)altitude);
   server.send(200, "application/json", json);
+  server.client().stop();
 }
 
 void handleStats() {
@@ -241,17 +242,28 @@ void handleProvision() {
   server.send_P(200, "text/html", HTML_PROVISION);
 }
 
-void handleScan() {
+// ===== Async WiFi scan state (Core 0 only — no mutex needed) =====
+static bool g_scanRunning = false;
+static int  g_scanCount   = 0;
+
+void startAsyncScan() {
+  if (g_scanRunning) return;
   WiFi.scanDelete();
   WiFi.scanNetworks(/*async=*/true);
-  unsigned long start = millis();
-  while (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-    if (millis() - start > 6000) break;
-    delay(50);  // yields to TCP/IP FreeRTOS task; Core 1 sensor loop runs normally
-  }
-  int n = WiFi.scanComplete();
-  if (n < 0) n = 0;
+  g_scanRunning = true;
+}
 
+void scanTick() {
+  if (!g_scanRunning) return;
+  int r = WiFi.scanComplete();
+  if (r == WIFI_SCAN_RUNNING) return;
+  g_scanCount   = (r >= 0) ? r : 0;
+  g_scanRunning = false;
+}
+
+void handleScan() {
+  // Build JSON from the last completed scan (returns immediately, never blocks)
+  int n = g_scanCount;
   char json[4200];
   uint16_t len = 0;
   json[len++] = '[';
@@ -267,6 +279,11 @@ void handleScan() {
   }
   json[len++] = ']';
   json[len]   = '\0';
+
+  // Kick off a fresh scan so the next call gets up-to-date results.
+  // scanDelete() is safe here because we've already serialised results above.
+  startAsyncScan();
+
   server.sendHeader("Cache-Control", "no-cache");
   server.send(200, "application/json", json);
 }
