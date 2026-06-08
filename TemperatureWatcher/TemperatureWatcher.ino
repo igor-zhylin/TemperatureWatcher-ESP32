@@ -25,11 +25,12 @@ DNSServer dnsServer;
 volatile bool apMode = false;
 bool ledState        = false;
 
-uint32_t lastSaveMs     = 0;
-uint32_t lastLcdMs      = 0;
-uint32_t wifiRetryMs    = 0;
-uint16_t wifiRetryCount = 0;
-bool wifiWasLost        = false;
+uint32_t lastSaveMs      = 0;
+uint32_t lastLcdMs       = 0;
+uint32_t wifiRetryMs     = 0;
+uint32_t wifiPeriodicMs  = 0;
+uint16_t wifiRetryCount  = 0;
+bool wifiWasLost         = false;
 
 // =============================================================================
 
@@ -198,6 +199,15 @@ void loop() {
     lastSaveMs = millis();
   }
 
+  // Periodic proactive reconnect — every 5 min even when connected, refreshes IP lease and LCD2
+  if (!apMode && WiFi.status() == WL_CONNECTED &&
+      millis() - wifiPeriodicMs >= WIFI_PERIODIC_INTERVAL) {
+    wifiPeriodicMs = millis();
+    wifiRetryMs    = millis() - WIFI_RETRY_INTERVAL;  // first retry fires immediately after disconnect
+    Serial.println("Periodic WiFi reconnect triggered");
+    WiFi.disconnect();
+  }
+
   // WiFi watchdog — reconnect every WIFI_RETRY_INTERVAL when disconnected
   if (!apMode && WiFi.status() != WL_CONNECTED) {
     if (!wifiWasLost) {
@@ -209,16 +219,34 @@ void loop() {
     if (millis() - wifiRetryMs >= WIFI_RETRY_INTERVAL) {
       wifiRetryMs = millis();
       int wifiErr = WiFi.status();
-      Serial.printf("WiFi retry #%u — %s\n", wifiRetryCount, wifiStatusToString(wifiErr));
       char buf[17];
       lcd2.clear();
-      snprintf(buf, sizeof(buf), "WiFi:RETRY #%-4u", wifiRetryCount);
-      lcd2.setCursor(0, 0); lcd2.print(buf);
-      snprintf(buf, sizeof(buf), "%-16s", wifiStatusToString(wifiErr));
-      lcd2.setCursor(0, 1); lcd2.print(buf);
-      WiFi.disconnect();
-      delay(100);
-      WiFi.begin(ssid, password);
+
+      if (wifiRetryCount < WIFI_HARD_RESET_AFTER) {
+        // Soft reconnect — standard sequence
+        Serial.printf("WiFi retry #%u (soft) — %s\n", wifiRetryCount, wifiStatusToString(wifiErr));
+        snprintf(buf, sizeof(buf), "WiFi:RETRY #%-4u", wifiRetryCount);
+        lcd2.setCursor(0, 0); lcd2.print(buf);
+        snprintf(buf, sizeof(buf), "%-16s", wifiStatusToString(wifiErr));
+        lcd2.setCursor(0, 1); lcd2.print(buf);
+        WiFi.disconnect();
+        delay(200);
+        WiFi.begin(ssid, password);
+      } else {
+        // Hard reset — full radio cycle to clear stuck driver state
+        Serial.printf("WiFi retry #%u (hard reset) — %s\n", wifiRetryCount, wifiStatusToString(wifiErr));
+        snprintf(buf, sizeof(buf), "WiFi:RST  #%-4u", wifiRetryCount);
+        lcd2.setCursor(0, 0); lcd2.print(buf);
+        lcd2.setCursor(0, 1); lcd2.print("Radio full reset");
+        WiFi.disconnect(true);
+        delay(500);
+        WiFi.mode(WIFI_OFF);
+        delay(1000);
+        WiFi.mode(WIFI_STA);
+        delay(200);
+        WiFi.begin(ssid, password);
+      }
+
       wifiRetryCount++;
     }
   } else if (!apMode && wifiWasLost) {

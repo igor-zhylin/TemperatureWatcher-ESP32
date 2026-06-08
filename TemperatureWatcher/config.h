@@ -21,4 +21,9 @@
 
 // ===== Timing =====
 #define SAVE_INTERVAL 120000UL        // Flash write interval: 2 min → 523776 records ≈ 727 days
-#define WIFI_RETRY_INTERVAL 120000UL  // Delay between WiFi reconnect attempts
+#define WIFI_RETRY_INTERVAL    30000UL   // Delay between reconnect attempts when connection is lost (30 s)
+#define WIFI_PERIODIC_INTERVAL 300000UL  // Proactive reconnect interval (5 min) to refresh IP and LCD2
+// After this many soft retries a full radio reset is triggered (WiFi_OFF → WiFi_STA → begin).
+// Covers the ESP32 driver hang that makes soft reconnects silently fail.
+// 10 retries × 30 s = ~5 min before escalation; keeps trying indefinitely after that.
+#define WIFI_HARD_RESET_AFTER  10
