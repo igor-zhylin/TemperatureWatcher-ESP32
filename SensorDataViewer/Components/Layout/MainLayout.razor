@@ -1,0 +1,23 @@
+﻿@inherits LayoutComponentBase
+
+<div class="page">
+    <main>
+        <div class="top-row px-4">
+            <span class="brand">Sensor Data Viewer</span>
+            <button type="button" id="theme-toggle" class="btn btn-sm btn-outline-secondary"
+                    onclick="window.toggleTheme()" title="Переключить тему">
+                <span id="theme-toggle-icon">🌙</span>
+            </button>
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>

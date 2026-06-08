@@ -1,0 +1,329 @@
+@page "/"
+@using System.Net.Http
+@using SensorDataViewer.Models
+@using SensorDataViewer.Services
+@inject CsvImporter Importer
+@inject IHttpClientFactory HttpFactory
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+@implements IDisposable
+
+<PageTitle>Sensor Data Viewer</PageTitle>
+
+<h1>Sensor Data Viewer</h1>
+<p class="text-muted">Импорт CSV с датчиков (ESP32 weather station) и графики по всем метрикам.</p>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="row g-4">
+            <div class="col-md-6 border-end-md pe-md-4">
+                <label class="form-label fw-bold">Импорт из файла</label>
+                <InputFile OnChange="OnFileSelected" class="form-control" accept=".csv,text/csv" />
+                <div class="form-text">Выберите CSV файл, экспортированный с устройства.</div>
+            </div>
+            <div class="col-md-6 ps-md-4">
+                <label class="form-label fw-bold">Импорт по URL</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" @bind="_deviceUrl" placeholder="192.168.31.103/api/export" />
+                    <button class="btn btn-primary" @onclick="ImportFromUrl" disabled="@_loading">Загрузить</button>
+                </div>
+                <div class="form-text">Полный адрес CSV-эндпоинта устройства, включая <code>/api/export</code>.</div>
+            </div>
+        </div>
+        <div class="form-text mt-2">Ожидаемые столбцы: num, time, temperature_c, pressure_hpa, pressure_mmhg, altitude_m</div>
+        @if (_loading)
+        {
+            <div class="mt-2 d-flex align-items-center gap-2">
+                <div class="spinner-border spinner-border-sm"></div>
+                <span>@(_streaming ? $"Загружено {_readings.Count} записей…" : "Обработка…")</span>
+                <button class="btn btn-sm btn-outline-danger" @onclick="Cancel">Отмена</button>
+            </div>
+        }
+    </div>
+</div>
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+
+@if (_warnings.Count > 0)
+{
+    <div class="alert alert-warning">
+        <strong>Предупреждения (@_warnings.Count):</strong>
+        <ul class="mb-0">
+            @foreach (var w in _warnings.Take(10))
+            {
+                <li>@w</li>
+            }
+            @if (_warnings.Count > 10)
+            {
+                <li>… и ещё @(_warnings.Count - 10)</li>
+            }
+        </ul>
+    </div>
+}
+
+@if (_readings.Count > 0)
+{
+    <div class="row mb-4">
+        <div class="col-auto"><div class="card"><div class="card-body py-2">
+            <div class="text-muted small">Записей</div><div class="fs-4">@_readings.Count</div>
+        </div></div></div>
+        <div class="col-auto"><div class="card"><div class="card-body py-2">
+            <div class="text-muted small">Период</div><div class="fs-6">@TimeRange()</div>
+        </div></div></div>
+        @foreach (var m in Metrics.All)
+        {
+            <div class="col-auto"><div class="card"><div class="card-body py-2">
+                <div class="text-muted small">@m.Label, @m.Unit</div>
+                <div class="fs-6">мин @Min(m).ToString("0.0") / макс @Max(m).ToString("0.0")</div>
+            </div></div></div>
+        }
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="d-flex align-items-center gap-3 flex-wrap">
+                <label class="fw-bold mb-0">Размер выборки</label>
+                <input type="range" class="form-range flex-grow-1" style="min-width:200px"
+                       min="@MinSample" max="@_readings.Count" step="1"
+                       value="@_sampleSize" @onchange="OnSampleSizeChanged" />
+                <span class="text-nowrap">@_sampleSize из @_readings.Count точек</span>
+                <button class="btn btn-sm btn-outline-primary" @onclick="ShowAll">Весь промежуток</button>
+            </div>
+            <div class="form-text">Меньше точек — быстрее и нагляднее; «Весь промежуток» строит график по всем записям.</div>
+        </div>
+    </div>
+
+    @foreach (var m in Metrics.All)
+    {
+        <div class="card mb-4">
+            <div class="card-header">@m.Label (@m.Unit)</div>
+            <div class="card-body">
+                <div style="position:relative;height:300px;">
+                    <canvas id="chart-@m.Key"></canvas>
+                </div>
+            </div>
+        </div>
+    }
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>Данные</span>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="() => _showTable = !_showTable">
+                @(_showTable ? "Скрыть" : "Показать") таблицу
+            </button>
+        </div>
+        @if (_showTable)
+        {
+            <div class="table-responsive" style="max-height:400px;overflow:auto;">
+                <table class="table table-sm table-striped mb-0">
+                    <thead class="sticky-top bg-light">
+                        <tr><th>#</th><th>Время</th><th>°C</th><th>hPa</th><th>mmHg</th><th>m</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _readings)
+                        {
+                            <tr>
+                                <td>@r.Num</td>
+                                <td>@(r.Time?.ToString("yyyy-MM-dd HH:mm:ss") ?? "—")</td>
+                                <td>@r.TemperatureC.ToString("0.0")</td>
+                                <td>@r.PressureHpa.ToString("0.0")</td>
+                                <td>@r.PressureMmHg.ToString("0.0")</td>
+                                <td>@r.AltitudeM.ToString("0.0")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<SensorReading> _readings = [];
+    private List<string> _warnings = [];
+    private string? _error;
+    private bool _loading;
+    private bool _showTable;
+    private bool _renderCharts;
+    private int _sampleSize;
+    private string _deviceUrl = "192.168.31.103/api/export";
+    private bool _streaming;
+    private CancellationTokenSource? _cts;
+
+    // Smallest selectable point count (clamped to total for tiny datasets).
+    private int MinSample => Math.Min(10, _readings.Count);
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        BeginLoad();
+        try
+        {
+            // 10 MB cap matches the SignalR receive limit set in Program.cs.
+            await using var stream = e.File.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            ms.Position = 0;
+            await LoadAsync(ms);
+        }
+        catch (Exception ex)
+        {
+            _error = $"Не удалось импортировать файл: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ImportFromUrl()
+    {
+        BeginLoad();
+        _streaming = true;
+        var ct = _cts!.Token;
+        try
+        {
+            var url = BuildExportUrl(_deviceUrl);
+            var http = HttpFactory.CreateClient();
+            http.Timeout = Timeout.InfiniteTimeSpan; // a full-history dump streams slowly; cancel via the button instead
+
+            // ResponseHeadersRead returns as soon as headers arrive, so we parse the body as it streams in.
+            using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            resp.EnsureSuccessStatusCode();
+            await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await foreach (var r in Importer.ParseAsync(stream, _warnings, ct))
+            {
+                _readings.Add(r);
+                // Throttle UI refreshes to ~every 400 ms so charts fill in without flooding the circuit.
+                if (sw.ElapsedMilliseconds >= 400)
+                {
+                    sw.Restart();
+                    await RefreshChartsAsync();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _warnings.Add("Загрузка отменена — показаны уже полученные данные.");
+        }
+        catch (Exception ex)
+        {
+            _error = $"Не удалось загрузить по URL: {ex.Message}";
+        }
+        finally
+        {
+            // Final draw with everything received (or whatever arrived before cancel/error).
+            _sampleSize = Math.Min(_readings.Count, 1000);
+            _renderCharts = _readings.Count > 0;
+            _streaming = false;
+            _loading = false;
+        }
+    }
+
+    // Redraws charts mid-stream with the data received so far.
+    private async Task RefreshChartsAsync()
+    {
+        _sampleSize = Math.Min(_readings.Count, 1000);
+        _renderCharts = _readings.Count > 0;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void Cancel() => _cts?.Cancel();
+
+    public void Dispose() => _cts?.Cancel();
+
+    private void BeginLoad()
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        _error = null;
+        _warnings = [];
+        _readings = [];
+        _streaming = false;
+        _loading = true;
+    }
+
+    private async Task LoadAsync(Stream stream)
+    {
+        var result = await Importer.ImportAsync(stream);
+        _readings = result.Readings;
+        _warnings = result.Warnings;
+        // Default to a capped point count for snappy first render; slider goes up to the full range.
+        _sampleSize = Math.Min(_readings.Count, 1000);
+        _renderCharts = _readings.Count > 0;
+    }
+
+    /// <summary>Prefixes the scheme if the user omitted it; the path is entered by the user.</summary>
+    private static string BuildExportUrl(string input)
+    {
+        var s = (input ?? string.Empty).Trim();
+        if (s.Length == 0) s = "192.168.31.103/api/export";
+        if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            s = "http://" + s;
+        return s;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_renderCharts) return;
+        _renderCharts = false;
+
+        var sample = Sampled();
+        var labels = sample
+            .Select((r, i) => r.Time?.ToString("MM-dd HH:mm") ?? (i + 1).ToString())
+            .ToArray();
+
+        foreach (var m in Metrics.All)
+        {
+            var data = sample.Select(m.Selector).ToArray();
+            await JS.InvokeVoidAsync("renderLineChart",
+                $"chart-{m.Key}", labels, m.Label, m.Unit, m.Color, data);
+        }
+    }
+
+    private void OnSampleSizeChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var v))
+        {
+            _sampleSize = Math.Clamp(v, MinSample, _readings.Count);
+            _renderCharts = true;
+        }
+    }
+
+    private void ShowAll()
+    {
+        _sampleSize = _readings.Count;
+        _renderCharts = true;
+    }
+
+    /// <summary>
+    /// Evenly-spaced subset of <see cref="_readings"/> with ~<see cref="_sampleSize"/> points.
+    /// Always keeps the first and last reading so the chart spans the whole time range.
+    /// </summary>
+    private IReadOnlyList<SensorReading> Sampled()
+    {
+        int total = _readings.Count;
+        if (_sampleSize >= total || _sampleSize <= 1) return _readings;
+
+        var result = new List<SensorReading>(_sampleSize);
+        double step = (double)(total - 1) / (_sampleSize - 1);
+        for (int i = 0; i < _sampleSize; i++)
+            result.Add(_readings[(int)Math.Round(i * step)]);
+        return result;
+    }
+
+    private double Min(Metric m) => _readings.Count == 0 ? 0 : _readings.Min(m.Selector);
+    private double Max(Metric m) => _readings.Count == 0 ? 0 : _readings.Max(m.Selector);
+
+    private string TimeRange()
+    {
+        var times = _readings.Where(r => r.Time.HasValue).Select(r => r.Time!.Value).ToList();
+        if (times.Count == 0) return "—";
+        return $"{times.Min():yyyy-MM-dd HH:mm} … {times.Max():yyyy-MM-dd HH:mm}";
+    }
+}
