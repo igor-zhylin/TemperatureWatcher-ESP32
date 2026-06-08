@@ -33,15 +33,26 @@ h1{text-align:center;margin-bottom:24px;font-size:1.4em;color:#e94560}
 <div class="row"><span class="label">Pressure</span><span class="value" id="p1">…</span></div>
 <div class="row"><span class="label">Pressure</span><span class="value" id="p2">…</span></div>
 <div class="row"><span class="label">Altitude</span><span class="value" id="al">…</span></div>
+<div class="row"><span class="label">Trend</span><span class="value" id="tr">…</span></div>
+<div class="row"><span class="label">24h Min / Max</span><span class="value" id="mn">…</span></div>
+<div class="row"><span class="label">Uptime</span><span class="value" id="up">…</span></div>
+<div class="row"><span class="label">Signal</span><span class="value" id="rs">…</span></div>
 <div class="footer"><span id="ts"></span></div>
 </div></main>
 <script>
+function fmtUp(s){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+'h '+m+'m';}
 function upd(){
   fetch('/api/data').then(r=>r.json()).then(d=>{
-    document.getElementById('t').textContent=d.temperature_c+' \u00b0C';
+    var tel=document.getElementById('t');
+    tel.textContent=d.temperature_c+' \u00b0C';
+    tel.style.color=d.sensor_ok?'':'#f90';
     document.getElementById('p1').textContent=d.pressure_hpa+' hPa';
     document.getElementById('p2').textContent=d.pressure_mmhg+' mmHg';
     document.getElementById('al').textContent=d.altitude_m+' m';
+    document.getElementById('tr').textContent=d.trend>0?'\u2191 Rising':d.trend<0?'\u2193 Falling':'\u2192 Stable';
+    document.getElementById('mn').textContent=d.temp_min_24h+' / '+d.temp_max_24h+' \u00b0C';
+    document.getElementById('up').textContent=fmtUp(d.uptime_s);
+    document.getElementById('rs').textContent=d.rssi+' dBm';
     document.getElementById('ts').textContent=new Date().toLocaleTimeString();
   });
 }

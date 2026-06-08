@@ -86,14 +86,27 @@ Install via **Library Manager** (Sketch → Include Library → Manage Libraries
 | **Adafruit BMP085 Library** | Adafruit | ≥ 1.2 | BMP180 sensor (temperature, pressure, altitude) |
 | **LiquidCrystal I2C** | Frank de Brabander | ≥ 1.1.2 | Both I2C LCD displays |
 | **SPIMemory** | Prajwal Bhattaram | ≥ 3.4 | W25Q64 SPI flash chip |
+| **ESPAsyncWebServer** | ESP32Async | latest | Async HTTP server (live data, history, CSV export) |
+| **AsyncTCP** | ESP32Async | latest | TCP layer required by ESPAsyncWebServer |
+| **PubSubClient** *(optional)* | Nick O'Leary | ≥ 2.8 | MQTT publishing — only needed if you enable `MQTT_BROKER` in `config.h` |
+
+> **ESPAsyncWebServer / AsyncTCP:** use the **ESP32Async** forks (they support ESP32 core 3.x). Both are in Library Manager as *ESPAsyncWebServer* and *Async TCP* by **ESP32Async**, or install from source:
+> ```bash
+> arduino-cli config set library.enable_unsafe_install true
+> arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
+> arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
+> ```
+> The old **me-no-dev** fork will **not** compile on ESP32 core 3.x — if you see
+> `'mbedtls_md5_starts_ret' was not declared`, delete `~/Arduino/libraries/ESPAsyncWebServer`
+> (and any old `AsyncTCP`/`ESPAsyncTCP`) and install the ESP32Async forks above.
 
 The following libraries come bundled with the esp32 board package — **no separate install needed**:
 
 | Library | Used for |
 |---|---|
 | WiFi | Wi-Fi STA/AP mode |
-| WebServer | HTTP server |
 | DNSServer | Captive portal in AP mode |
+| ArduinoOTA | Over-the-air firmware updates |
 | SPI | SPI bus (flash chip) |
 | Wire | I2C bus (LCDs, BMP180) |
 

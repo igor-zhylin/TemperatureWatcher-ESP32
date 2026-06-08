@@ -17,8 +17,10 @@ static void flashWriteMeta() {
     metaSlot = 0;
   }
   uint32_t addr = (uint32_t)metaSlot * META_SLOT_SIZE;
-  flash.writeAnything(addr, writeIdx);
-  flash.writeAnything(addr + 4, totalWritten);
+  // Single writeAnything call = single SPI page-program command = atomic.
+  // Two separate calls would leave totalWritten=0xFFFFFFFF on power loss between them.
+  struct { uint32_t wi; uint32_t tw; } m = { writeIdx, totalWritten };
+  flash.writeAnything(addr, m);
   metaSlot++;
 }
 
@@ -51,8 +53,10 @@ void flashInit() {
     Serial.println("Flash: initialized fresh (~727 days at 2 min interval)");
   } else {
     uint32_t lastAddr = (uint32_t)(lo - 1) * META_SLOT_SIZE;
-    flash.readAnything(lastAddr, writeIdx);
-    flash.readAnything(lastAddr + 4, totalWritten);
+    struct { uint32_t wi; uint32_t tw; } m;
+    flash.readAnything(lastAddr, m);
+    writeIdx     = m.wi;
+    totalWritten = m.tw;
     Serial.printf("Flash: resuming at record %u (total %u), meta slot %u/%u\n",
                   writeIdx, totalWritten, metaSlot, (uint16_t)META_SLOT_COUNT);
   }
@@ -77,8 +81,10 @@ void saveCredsToFlash(const char* s, const char* p) {
   memset(c.password, 0, sizeof(c.password));
   strncpy(c.ssid, s, 32);
   strncpy(c.password, p, 64);
+  xSemaphoreTake(flashMutex, portMAX_DELAY);
   flash.eraseSector(CREDS_ADDR);
   flash.writeAnything(CREDS_ADDR, c);
+  xSemaphoreGive(flashMutex);
 }
 
 void flashSaveRecord() {

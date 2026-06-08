@@ -1,9 +1,10 @@
 #pragma once
+#include <pgmspace.h>
 
 // Static head + CSS block for the /api/stats history page.
 // Used by handleStats() via ap() — passed as a single large write before dynamic content.
 // Single-quoted attributes throughout to avoid escaping conflicts with C string literals.
-static const char HTML_STATS_HEAD[] =
+static const char HTML_STATS_HEAD[] PROGMEM =
   "<!DOCTYPE html><html lang='en'><head>"
   "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
   "<title>History</title><style>"
@@ -31,8 +32,8 @@ static const char HTML_STATS_HEAD[] =
   "<main><div class='card'>";
 
 // Static footer block for the /api/stats history page.
-static const char HTML_STATS_FOOT[] =
-  "</table><div style='text-align:center'>"
+static const char HTML_STATS_FOOT[] PROGMEM =
+  "<div style='text-align:center'>"
   "<a class='btn' href='/api/export'>Download CSV</a>&nbsp;&nbsp;"
   "<a class='btn' href='/api/reset-flash' onclick=\"return confirm('Delete all flash records?')\">"
   "Reset Flash</a></div></div></main></body></html>";
