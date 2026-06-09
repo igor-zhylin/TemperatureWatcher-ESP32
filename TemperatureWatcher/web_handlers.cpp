@@ -22,10 +22,12 @@ void handleApi(AsyncWebServerRequest *request) {
   snprintf(json, sizeof(json),
            "{\"temperature_c\":%.1f,\"pressure_hpa\":%.1f,\"pressure_mmhg\":%.1f,\"altitude_m\":%.1f,"
            "\"trend\":%d,\"temp_min_24h\":%.1f,\"temp_max_24h\":%.1f,"
-           "\"uptime_s\":%lu,\"rssi\":%d,\"sensor_ok\":%d}",
+           "\"uptime_s\":%lu,\"rssi\":%d,\"sensor_ok\":%d,"
+           "\"free_heap\":%lu,\"min_free_heap\":%lu}",
            (float)temp, (float)pressureHPa, (float)pressureMmHg, (float)altitude,
            (int)pressureTrend, tempMin24h, tempMax24h,
-           (unsigned long)(millis() / 1000), WiFi.RSSI(), sensorOK ? 1 : 0);
+           (unsigned long)(millis() / 1000), WiFi.RSSI(), sensorOK ? 1 : 0,
+           (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size());
   AsyncWebServerResponse *res = request->beginResponse(200, "application/json", json);
   res->addHeader("Cache-Control", "no-cache");
   request->send(res);
