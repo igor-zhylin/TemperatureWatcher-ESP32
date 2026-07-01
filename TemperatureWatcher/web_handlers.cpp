@@ -11,10 +11,29 @@
 AsyncWebServer server(80);
 volatile uint32_t g_rebootAtMs = 0;
 
-void handleRoot(AsyncWebServerRequest *request) {
-  AsyncWebServerResponse *res = request->beginResponse_P(200, "text/html", HTML_ROOT);
+static const uint32_t STATS_PAGE_SIZE = 25;  // records shown per /api/stats page
+
+// Build-time identifier used as an ETag for the static page shells below --
+// changes automatically on every recompile, so a browser's cached copy is
+// invalidated the moment new firmware boots. Combined with "no-cache" (which
+// forces revalidation rather than blind reuse), a same-session revisit to a
+// tab costs just a small conditional-GET round trip (304, no body) instead of
+// re-downloading the whole HTML/CSS/JS shell every time.
+static const char PAGE_ETAG[] = "\"" __DATE__ "-" __TIME__ "\"";
+
+static void sendStaticPage(AsyncWebServerRequest *request, const char* pageProgmem) {
+  if (request->hasHeader("If-None-Match") && request->getHeader("If-None-Match")->value() == PAGE_ETAG) {
+    request->send(304);
+    return;
+  }
+  AsyncWebServerResponse *res = request->beginResponse_P(200, "text/html", pageProgmem);
   res->addHeader("Cache-Control", "no-cache");
+  res->addHeader("ETag", PAGE_ETAG);
   request->send(res);
+}
+
+void handleRoot(AsyncWebServerRequest *request) {
+  sendStaticPage(request, HTML_ROOT);
 }
 
 void handleApi(AsyncWebServerRequest *request) {
@@ -46,11 +65,14 @@ void handleStats(AsyncWebServerRequest *request) {
     if (v > 0) offset = (uint32_t)v;
   }
 
-  // Snapshot ring-buffer position under mutex so n and startIdx are consistent.
-  xSemaphoreTake(flashMutex, portMAX_DELAY);
-  uint32_t tw = totalWritten;
-  uint32_t wi = writeIdx;
-  xSemaphoreGive(flashMutex);
+  // Snapshot ring-buffer position with a bounded wait so n and startIdx stay
+  // consistent, without risking an indefinite block of this shared AsyncTCP
+  // task if the flash worker is stuck on a glitched chip (see flash.h).
+  uint32_t tw, wi;
+  if (!flashSafeSnapshot(&wi, &tw)) {
+    request->send(503, "text/plain", "Flash busy, try again");
+    return;
+  }
 
   if (tw == 0 || offset >= tw) {
     request->send(200, "text/html",
@@ -63,22 +85,24 @@ void handleStats(AsyncWebServerRequest *request) {
   }
 
   uint32_t avail    = tw - offset;
-  uint32_t n        = (avail < 50) ? avail : 50;
+  uint32_t n        = (avail < STATS_PAGE_SIZE) ? avail : STATS_PAGE_SIZE;
   uint32_t startIdx = (wi - offset - n + (uint32_t)MAX_RECORDS * 2) % MAX_RECORDS;
 
-  // Bulk flash read — wrap-around aware, mutex-protected against flashSaveRecord().
-  Record recs[50];
-  xSemaphoreTake(flashMutex, portMAX_DELAY);
-  digitalWrite(WRITE_LED, HIGH);
+  // Bulk flash read — wrap-around aware, run on the flash worker with a bounded
+  // wait so a stuck chip can't block this shared AsyncTCP task (see flash.h).
+  Record recs[STATS_PAGE_SIZE];
+  bool readOk;
   if (startIdx + n <= MAX_RECORDS) {
-    flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, n * RECORD_SIZE);
+    readOk = flashSafeReadBytes(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, n * RECORD_SIZE);
   } else {
     uint32_t fp = MAX_RECORDS - startIdx;
-    flash.readByteArray(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, fp * RECORD_SIZE);
-    flash.readByteArray(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
+    readOk = flashSafeReadBytes(RECORDS_ADDR + startIdx * RECORD_SIZE, (uint8_t*)recs, fp * RECORD_SIZE) &&
+             flashSafeReadBytes(RECORDS_ADDR, (uint8_t*)recs + fp * RECORD_SIZE, (n - fp) * RECORD_SIZE);
   }
-  digitalWrite(WRITE_LED, LOW);
-  xSemaphoreGive(flashMutex);
+  if (!readOk) {
+    request->send(503, "text/plain", "Flash busy, try again");
+    return;
+  }
 
   // Reverse in place (newest first) — local RAM copy, no mutex needed.
   for (uint32_t i = 0, j = n - 1; i < j; i++, j--) {
@@ -91,7 +115,7 @@ void handleStats(AsyncWebServerRequest *request) {
     if (recs[i].temp > tmax) tmax = recs[i].temp;
   }
 
-  // Build the page in RAM (bounded: ~50 rows + 2 charts ≈ 12 KB) and let the
+  // Build the page in RAM (bounded: ~25 rows + 2 charts ≈ 8 KB) and let the
   // async server stream it. Heavy lifting (flash) is already done above.
   String h;
   h.reserve(16384);
@@ -230,18 +254,18 @@ void handleStats(AsyncWebServerRequest *request) {
 
   // ---- Pagination navigation ----
   {
-    bool hasNewer = (offset >= 50);
-    bool hasOlder = (offset + 50 < tw);
+    bool hasNewer = (offset >= STATS_PAGE_SIZE);
+    bool hasOlder = (offset + STATS_PAGE_SIZE < tw);
     if (hasNewer || hasOlder) {
       h += "<div style='text-align:center;margin-top:12px'>";
       if (hasNewer) {
         snprintf(buf, sizeof(buf), "<a class='btn' href='/api/stats?offset=%u'>&larr; Newer</a>&nbsp;&nbsp;",
-                 offset >= 50 ? offset - 50 : 0);
+                 offset >= STATS_PAGE_SIZE ? offset - STATS_PAGE_SIZE : 0);
         h += buf;
       }
       if (hasOlder) {
         snprintf(buf, sizeof(buf), "<a class='btn' href='/api/stats?offset=%u'>Older &rarr;</a>",
-                 offset + 50);
+                 offset + STATS_PAGE_SIZE);
         h += buf;
       }
       h += "</div>";
@@ -251,6 +275,11 @@ void handleStats(AsyncWebServerRequest *request) {
   h += FPSTR(HTML_STATS_FOOT);
   request->send(200, "text/html", h);
 }
+
+// Records fetched per flash read for CSV export, instead of one SPI transaction
+// per row -- a full ~523k-record export would otherwise cost 523k individual
+// reads. Batching cuts that by this factor, at 1KB of extra RAM per export.
+static const uint32_t EXPORT_BATCH_RECORDS = 64;
 
 // Pull-based state for the streamed CSV export. Held by a shared_ptr captured in
 // the chunk filler so it lives exactly as long as the response.
@@ -262,6 +291,9 @@ struct ExportState {
   char     carry[96];  // one formatted CSV line awaiting copy into the TCP buffer
   size_t   carryLen;
   size_t   carryPos;
+  Record   batch[EXPORT_BATCH_RECORDS];  // records read ahead in bulk
+  uint32_t batchLen;    // valid records currently in batch
+  uint32_t batchPos;    // next unconsumed record in batch
 };
 
 void handleExport(AsyncWebServerRequest *request) {
@@ -270,11 +302,16 @@ void handleExport(AsyncWebServerRequest *request) {
     return;
   }
 
-  // Snapshot ring-buffer position under mutex.
-  xSemaphoreTake(flashMutex, portMAX_DELAY);
-  uint32_t count    = min(totalWritten, (uint32_t)MAX_RECORDS);
-  uint32_t startIdx = (writeIdx - count + MAX_RECORDS) % MAX_RECORDS;
-  xSemaphoreGive(flashMutex);
+  // Snapshot ring-buffer position with a bounded wait (see flash.h) instead of
+  // an indefinite mutex take, so a stuck flash worker can't freeze this shared
+  // AsyncTCP task.
+  uint32_t wi, tw;
+  if (!flashSafeSnapshot(&wi, &tw)) {
+    request->send(503, "text/plain", "Flash busy, try again");
+    return;
+  }
+  uint32_t count    = min(tw, (uint32_t)MAX_RECORDS);
+  uint32_t startIdx = (wi - count + MAX_RECORDS) % MAX_RECORDS;
 
   auto state = std::make_shared<ExportState>();
   state->count      = count;
@@ -283,9 +320,12 @@ void handleExport(AsyncWebServerRequest *request) {
   state->headerSent = false;
   state->carryLen   = 0;
   state->carryPos   = 0;
+  state->batchLen   = 0;
+  state->batchPos   = 0;
 
-  // Filler is called repeatedly by AsyncTCP; it emits the header, then one record
-  // per flash read, copying into the buffer until it is full or all records are sent.
+  // Filler is called repeatedly by AsyncTCP; it emits the header, then records
+  // (fetched from flash in EXPORT_BATCH_RECORDS-sized batches), copying into the
+  // buffer until it is full or all records are sent.
   AsyncWebServerResponse *res = request->beginChunkedResponse("text/csv",
     [state](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
       size_t written = 0;
@@ -299,14 +339,25 @@ void handleExport(AsyncWebServerRequest *request) {
                              "num,time,temperature_c,pressure_hpa,pressure_mmhg,altitude_m\r\n");
             state->carryLen = (w > 0) ? min((size_t)w, sizeof(state->carry) - 1) : 0;
           } else if (state->rec < state->count) {
-            Record r;
-            uint32_t idx = (state->startIdx + state->rec) % MAX_RECORDS;
-            xSemaphoreTake(flashMutex, portMAX_DELAY);
-            digitalWrite(WRITE_LED, HIGH);
-            flash.readByteArray(RECORDS_ADDR + (uint32_t)idx * RECORD_SIZE, (uint8_t*)&r, RECORD_SIZE);
-            digitalWrite(WRITE_LED, LOW);
-            xSemaphoreGive(flashMutex);
+            if (state->batchPos >= state->batchLen) {
+              // Current batch exhausted — pull the next chunk of records in one
+              // flash read (wrap-around aware), instead of one read per row.
+              uint32_t toFetch = min(EXPORT_BATCH_RECORDS, state->count - state->rec);
+              uint32_t idx     = (state->startIdx + state->rec) % MAX_RECORDS;
+              bool ok;
+              if (idx + toFetch <= MAX_RECORDS) {
+                ok = flashSafeReadBytes(RECORDS_ADDR + idx * RECORD_SIZE, (uint8_t*)state->batch, toFetch * RECORD_SIZE);
+              } else {
+                uint32_t fp = MAX_RECORDS - idx;
+                ok = flashSafeReadBytes(RECORDS_ADDR + idx * RECORD_SIZE, (uint8_t*)state->batch, fp * RECORD_SIZE) &&
+                     flashSafeReadBytes(RECORDS_ADDR, (uint8_t*)state->batch + fp * RECORD_SIZE, (toFetch - fp) * RECORD_SIZE);
+              }
+              if (!ok) break;  // flash worker stuck/busy — end the stream early rather than freeze every client
+              state->batchLen = toFetch;
+              state->batchPos = 0;
+            }
 
+            const Record& r = state->batch[state->batchPos++];
             char tbuf[20] = "";
             if (r.timestamp > 0) {
               time_t t = r.timestamp; struct tm ti; localtime_r(&t, &ti);
@@ -333,9 +384,7 @@ void handleExport(AsyncWebServerRequest *request) {
 }
 
 void handleProvision(AsyncWebServerRequest *request) {
-  AsyncWebServerResponse *res = request->beginResponse_P(200, "text/html", HTML_PROVISION);
-  res->addHeader("Cache-Control", "no-cache");
-  request->send(res);
+  sendStaticPage(request, HTML_PROVISION);
 }
 
 // ===== Async WiFi scan state (polled by taskWeb; read by handlers) =====
@@ -415,7 +464,10 @@ void handleSave(AsyncWebServerRequest *request) {
   strncpy(s, request->getParam("ssid", true)->value().c_str(), 32);
   if (request->hasParam("password", true))
     strncpy(p, request->getParam("password", true)->value().c_str(), 64);
-  saveCredsToFlash(s, p);
+  if (!saveCredsToFlash(s, p)) {
+    request->send(503, "text/plain", "Flash busy, try again");
+    return;
+  }
   request->send(200, "text/plain", "OK");
   g_rebootAtMs = millis() + 800;  // restart after the response has flushed (done in loop())
 }
@@ -426,6 +478,9 @@ void handleReboot(AsyncWebServerRequest *request) {
 }
 
 void handleFlashReset(AsyncWebServerRequest *request) {
-  flashReset();
+  if (!flashReset()) {
+    request->send(503, "text/plain", "Flash busy, try again");
+    return;
+  }
   request->redirect("/api/stats");
 }
